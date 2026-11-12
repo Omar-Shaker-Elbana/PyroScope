@@ -1,0 +1,2579 @@
+diff -ruN '--exclude=__pycache__' a/src/anomaly.py b/src/anomaly.py
+--- a/src/anomaly.py	2026-11-07 12:11:14.000000000 +0000
++++ b/src/anomaly.py	2026-11-08 16:31:28.890951530 +0000
+@@ -4,15 +4,20 @@
+ data/processed/calendar_daily.csv from `python -m src.harmonize`.
+ 
+ What it does
+- 1. Builds one daily series on the VIIRS-equivalent FRP scale. Days that are partial
+-    (day_complete=False) or not present in the raw files (day_observed=False) are MISSING,
+-    never zero.
++ 1. Builds one daily series on the VIIRS reference scale from days whose `harmonized_status` is `measured` or
++    `measured_zero`. Everything else is MISSING, never zero: days the VIIRS file does not contain
++    (`viirs_not_observed`), the two partial days at the window edges (`partial_day`), and days that look like
++    partial outages (`measured_low_coverage`, excluded unless PYRO_ANOM_INCLUDE_LOW_COVERAGE=1, because a day that lost
++    overpasses is biased low and would be flagged as a 'low' anomaly). MODIS is never substituted for VIIRS.
+  2. Anomalies: for every day, a robust baseline (median and MAD of log1p FRP) taken from the
+     same time of year (+- PYRO_ANOM_WINDOW days) in ALL OTHER YEARS (leave-one-year-out, so an
+     extreme year cannot hide itself). robust z = (x - median) / (1.4826 * MAD).
+  3. Anomalous episodes: runs of elevated days (z >= 2, gaps <= 2 days merged, >= 3 days,
+     peak z >= PYRO_ANOM_Z).
+- 4. Critical burning windows:
++ 4. Validation (anomaly_validation.py, on by default): every episode is re-tested under alternative baselines, scale
++    estimators, baseline periods, random data loss and a null model; see anomaly_validation.json. An episode is a
++    statistical candidate, not a proven exceptional event: read its `robustness` column.
++ 5. Critical burning windows:
+       - climatological: the smoothed multi-year median FRP by day of year; days at or above the
+         PYRO_CRIT_PCT percentile form the typical critical window(s), with their share of
+         annual FRP;
+@@ -21,14 +26,18 @@
+ 
+ Run:  python -m src.anomaly
+ Outputs (data/processed): anomalies_daily.csv, anomaly_events.csv, critical_windows.csv,
+-season_by_year.csv, anomaly_report.json, anomaly_overview.png
++season_by_year.csv, anomaly_report.json, anomaly_overview.png and, with validation, anomaly_validation.json,
++anomaly_variants.csv, anomaly_event_variants.csv, anomaly_validation.png
+ """
+ import json
+ 
+ import numpy as np
+ import pandas as pd
+ 
+-from src.config import PROCESSED_DIR, ANOM_MIN_YEARS, ANOM_Z, ANOM_WINDOW_DAYS, CRIT_PCT
++from src.config import (
++    PROCESSED_DIR, ANOM_MIN_YEARS, ANOM_Z, ANOM_WINDOW_DAYS, CRIT_PCT, ANOM_VALIDATE, ANOM_INCLUDE_LOW_COVERAGE,
++    ANOM_DETREND,
++)
+ 
+ VALUE_COL = "harmonized_frp_mw_viirs_equiv"
+ Z_EVENT = 2.0          # a day is "elevated" at or above this robust z
+@@ -37,6 +46,7 @@
+ MAD_FLOOR = 0.10       # log units; stops a near-constant baseline from making z explode
+ MIN_POOL = 10          # minimum baseline samples for a day to get a z at all
+ MIN_SEASON_VALID_DAYS = 330
++SCORING_STATUS = ("measured", "measured_zero")   # + measured_low_coverage with PYRO_ANOM_INCLUDE_LOW_COVERAGE=1
+ 
+ 
+ def doy365(dates: pd.Series) -> np.ndarray:
+@@ -56,45 +66,103 @@
+     if not p.exists():
+         raise SystemExit("calendar_daily.csv not found. Run `python -m src.harmonize` first.")
+     cal = pd.read_csv(p, parse_dates=["date"])
+-    ok = cal["day_complete"].astype(bool)
+-    if "day_observed" in cal.columns:
+-        ok &= cal["day_observed"].astype(bool)
++    cal = cal.copy()
++    if "harmonized_status" in cal.columns:
++        cal["status"] = cal["harmonized_status"].astype(str)
++        measured = cal["status"].isin(("measured", "measured_zero", "measured_low_coverage"))
++        ok = cal["status"].isin(SCORING_STATUS + (("measured_low_coverage",) if ANOM_INCLUDE_LOW_COVERAGE else ()))
++    else:  # calendar written before observation status existed: keep the old rule, never score MODIS fallbacks
++        ok = cal["day_complete"].astype(bool)
++        if "day_observed" in cal.columns:
++            ok &= cal["day_observed"].astype(bool)
++        if "harmonized_source" in cal.columns:
++            ok &= cal["harmonized_source"].astype(str).str.startswith("VIIRS")
++        cal["status"] = np.where(ok, "measured", "legacy_excluded")
++        measured = ok
+     cal["valid"] = ok
++    cal["value_measured"] = cal[VALUE_COL].where(measured)   # kept so validation can re-admit outage-suspect days
+     cal["value"] = cal[VALUE_COL].where(ok)
+     full = pd.date_range(cal["date"].min(), cal["date"].max(), freq="D")
+     cal = cal.set_index("date").reindex(full)
+     cal.index.name = "date"
+     cal["valid"] = cal["valid"].fillna(False).astype(bool)
++    cal["status"] = cal["status"].fillna("absent")
+     cal["doy"] = doy365(cal.index.to_series())
+     cal["year"] = cal.index.year
+     return cal
+ 
+ 
+ # --------------------------------------------------------------------------- anomalies
+-def baseline(x, doy, year, valid):
+-    """Leave-one-year-out robust median/MAD of x for every day (NaN where the pool is too small)."""
+-    med = np.full(len(x), np.nan)
+-    mad = np.full(len(x), np.nan)
++def _pool_mask(rule, yr, years):
++    """Which baseline years may be used for target year `yr`."""
++    if rule == "loyo":                       # all other years (default)
++        return years != yr
++    if rule == "past":                       # causal: only earlier years
++        return years < yr
++    if rule == "skip_neighbours":            # other years except the two adjacent ones (multi-year persistence)
++        return np.abs(years - yr) > 1
++    if isinstance(rule, (set, frozenset, tuple, list)):   # a fixed baseline period
++        return np.isin(years, list(rule)) & (years != yr)
++    raise ValueError(f"unknown pool rule {rule!r}")
++
++
++def _centre_scale(pool, method):
++    if method == "median_mad":
++        m = np.median(pool)
++        return m, 1.4826 * np.median(np.abs(pool - m))
++    if method == "median_iqr":
++        q1, m, q3 = np.percentile(pool, [25, 50, 75])
++        return m, (q3 - q1) / 1.349
++    if method == "mean_sd":                  # classical z-score: NOT robust to the extremes it is meant to find
++        return pool.mean(), pool.std(ddof=1)
++    raise ValueError(f"unknown method {method!r}")
++
++
++def baseline(x, doy, year, valid, window=None, method="median_mad", pool="loyo"):
++    """Seasonal baseline (centre, scale, pool size) of x for every day, from the same time of year (+-window days) in
++    the years allowed by `pool` (default: leave-one-year-out). Centre / scale are NaN where the pool is smaller than
++    MIN_POOL; the pool size is returned so a variant can be judged 'testable' only when its baseline is not tiny."""
++    window = ANOM_WINDOW_DAYS if window is None else window
++    cen = np.full(len(x), np.nan)
++    sca = np.full(len(x), np.nan)
++    npool = np.zeros(len(x))
++    usable = valid & np.isfinite(x)
+     for d in range(1, 366):
+         dist = np.abs(doy - d)
+         dist = np.minimum(dist, 365 - dist)
+-        in_win = valid & (dist <= ANOM_WINDOW_DAYS)
++        in_win = usable & (dist <= window)
+         targets = np.flatnonzero(doy == d)
+         for yr in np.unique(year[targets]):
+-            pool = x[in_win & (year != yr)]
+-            if len(pool) < MIN_POOL:
+-                continue
+-            m = np.median(pool)
++            pool_x = x[in_win & _pool_mask(pool, yr, year)]
+             rows = targets[year[targets] == yr]
+-            med[rows] = m
+-            mad[rows] = 1.4826 * np.median(np.abs(pool - m))
+-    return med, np.maximum(mad, MAD_FLOOR)
++            npool[rows] = len(pool_x)
++            if len(pool_x) < MIN_POOL:
++                continue
++            c, sc = _centre_scale(pool_x, method)
++            cen[rows] = c
++            sca[rows] = sc
++    return cen, np.maximum(sca, MAD_FLOOR), npool
+ 
+ 
+-def score(cal: pd.DataFrame) -> pd.DataFrame:
++def score(cal: pd.DataFrame, window=None, method="median_mad", pool="loyo", level_adjust=None, valid=None) -> pd.DataFrame:
++    """Robust z-scores of the daily series. The keyword arguments exist for the validation: every one of them has a
++    default that reproduces the production analysis.
++      valid        : override of the validity mask (e.g. to re-admit outage-suspect days or to thin the data)
++      level_adjust : remove each year's median level (guards against a multi-year trend contaminating the baseline);
++                     default PYRO_ANOM_DETREND (off)"""
++    level_adjust = ANOM_DETREND if level_adjust is None else level_adjust
+     df = cal.copy()
++    if valid is not None:
++        df["valid"] = np.asarray(valid, bool)
++        base_col = "value_measured" if "value_measured" in df.columns else "value"
++        df["value"] = df[base_col].where(df["valid"])
+     x = np.log1p(df["value"].to_numpy(float))
+-    med, mad = baseline(x, df["doy"].to_numpy(), df["year"].to_numpy(), df["valid"].to_numpy())
++    ok = df["valid"].to_numpy() & np.isfinite(x)
++    if level_adjust:
++        lvl = pd.Series(np.where(ok, x, np.nan)).groupby(df["year"].to_numpy()).transform("median").to_numpy()
++        x = x - (lvl - np.nanmedian(lvl))
++    med, mad, npool = baseline(x, df["doy"].to_numpy(), df["year"].to_numpy(), ok, window, method, pool)
++    df["pool_n"] = npool
+     df["baseline_mw"] = np.expm1(med)
+     df["band_low_mw"] = np.expm1(med - ANOM_Z * mad)
+     df["band_high_mw"] = np.expm1(med + ANOM_Z * mad)
+@@ -104,16 +172,28 @@
+     return df
+ 
+ 
++def episode_slices(z, z_event=Z_EVENT, peak_z=None, min_days=MIN_EVENT_DAYS, merge_gap=MERGE_GAP_DAYS):
++    """Episodes of an array of z-scores as (first_pos, last_pos) pairs. Elevated days (z >= z_event) closer than
++    merge_gap + 1 are merged; an episode needs >= min_days elevated days and a peak >= peak_z (default ANOM_Z).
++    The one rule shared by the production analysis, every validation variant and the Monte-Carlo null."""
++    peak_z = ANOM_Z if peak_z is None else peak_z
++    z = np.asarray(z, float)
++    idx = np.flatnonzero(z >= z_event)
++    if len(idx) == 0:
++        return []
++    out = []
++    for g in np.split(idx, np.flatnonzero(np.diff(idx) > merge_gap + 1) + 1):
++        if len(g) < min_days or np.nanmax(z[g[0]: g[-1] + 1]) < peak_z:
++            continue
++        out.append((int(g[0]), int(g[-1])))
++    return out
++
++
+ def find_events(df: pd.DataFrame) -> pd.DataFrame:
+     cols = ["start", "end", "duration_days", "peak_date", "peak_z", "total_frp_mw", "excess_frp_mw"]
+-    idx = np.flatnonzero((df["z"] >= Z_EVENT).to_numpy())
+-    if len(idx) == 0:
+-        return pd.DataFrame(columns=cols)
+     rows = []
+-    for g in np.split(idx, np.flatnonzero(np.diff(idx) > MERGE_GAP_DAYS + 1) + 1):
+-        seg = df.iloc[g[0]: g[-1] + 1]
+-        if len(g) < MIN_EVENT_DAYS or seg["z"].max() < ANOM_Z:
+-            continue
++    for a, b in episode_slices(df["z"].to_numpy()):
++        seg = df.iloc[a: b + 1]
+         rows.append({
+             "start": seg.index[0].date(), "end": seg.index[-1].date(),
+             "duration_days": len(seg), "peak_date": seg["z"].idxmax().date(),
+@@ -257,36 +337,49 @@
+     reasons = []
+     if n_years < ANOM_MIN_YEARS:
+         reasons.append(f"only {n_years:.1f} years of valid days (< {ANOM_MIN_YEARS})")
+-    src = cal.loc[cal["valid"], "harmonized_source"].value_counts(normalize=True)
+-    non_ref = 1.0 - sum(f for s, f in src.items() if str(s).startswith("VIIRS"))
+-    if non_ref > 0.05:
+-        reasons.append(f"{non_ref:.0%} of valid days use MODIS-scaled values instead of the VIIRS reference, "
+-                       "so source switches can look like anomalies")
++    by_status = {k: int(v) for k, v in cal["status"].value_counts().items()}
++    excluded = int(len(cal) - n_valid)
++    if excluded > 0.05 * len(cal):
++        reasons.append(f"{excluded / len(cal):.0%} of days are not usable (not observed, partial or outage-suspect)")
+     reliable = not reasons
+ 
+     df = score(cal)
+     events = find_events(df)
++    validation = None
++    if ANOM_VALIDATE:
++        from src import anomaly_validation
++        validation = anomaly_validation.validate(cal, df, events)
++        events = validation["events"]
+     sm = climatology(df)
+     windows, season_start_doy = critical_windows(sm)
+     seasons = season_by_year(df, season_start_doy)
+ 
+-    out = df[["value", "valid", "baseline_mw", "ratio_to_baseline", "z", "flag"]].rename(columns={"value": "frp_mw"})
++    out = df[["value", "valid", "status", "baseline_mw", "ratio_to_baseline", "z", "flag"]].rename(columns={"value": "frp_mw"})
+     out.to_csv(PROCESSED_DIR / "anomalies_daily.csv")
+     events.to_csv(PROCESSED_DIR / "anomaly_events.csv", index=False)
+     windows.to_csv(PROCESSED_DIR / "critical_windows.csv", index=False)
+     seasons.to_csv(PROCESSED_DIR / "season_by_year.csv", index=False)
+     plot(df, events, windows, sm, season_start_doy, seasons)
++    if validation is not None:
++        anomaly_validation.write_outputs(validation, df)
+ 
+     done = seasons[seasons["complete"]] if "window_days" in seasons else seasons.iloc[0:0]
+     report = {
+         "reliable": reliable, "reasons_unreliable": reasons,
+-        "valid_days": n_valid, "missing_days": int(len(cal) - n_valid), "years_of_valid_days": round(n_years, 2),
++        "valid_days": n_valid, "missing_days": excluded, "years_of_valid_days": round(n_years, 2),
++        "days_by_status": by_status,
++        "outage_suspect_days_excluded": 0 if ANOM_INCLUDE_LOW_COVERAGE else by_status.get("measured_low_coverage", 0),
+         "anomalous_days_high": int((df["flag"] == "high").sum()),
+         "anomalous_days_low": int((df["flag"] == "low").sum()),
+         "episodes": int(len(events)), "season_starts_at_doy": season_start_doy,
+         "complete_seasons": int(len(done)),
+         "median_window_days": None if done.empty else float(done["window_days"].median()),
+-        "caveat": ("'low' flags can be satellite or ground-segment outages, not less fire. A single "
++        "episode_robustness": ({} if validation is None else
++                               {k: int(v) for k, v in events["robustness"].value_counts().items()}),
++        "validation_file": None if validation is None else "anomaly_validation.json",
++        "caveat": ("An episode is a statistical candidate: a z-score does not prove that an event is scientifically "
++                   "exceptional (see `robustness` and anomaly_validation.json). 'low' flags can be satellite or "
++                   "ground-segment outages, not less fire; days that look like partial outages are excluded. A single "
+                    "reference sensor family is assumed; the trend is not removed."),
+     }
+     (PROCESSED_DIR / "anomaly_report.json").write_text(json.dumps(report, indent=2))
+@@ -295,10 +388,13 @@
+     print(windows[["start", "end", "peak", "length_days", "share_of_annual_frp"]].round(3).to_string(index=False))
+     print("\nAnomalous episodes:")
+     print(events.round(2).to_string(index=False) if len(events) else "none")
++    if validation is not None:
++        print("\nValidation:", validation["summary_text"])
+     if not reliable:
+         print("\nUNRELIABLE:", "; ".join(reasons))
+     print("\nSaved anomalies_daily.csv, anomaly_events.csv, critical_windows.csv, season_by_year.csv, "
+-          "anomaly_report.json, anomaly_overview.png in", PROCESSED_DIR)
++          "anomaly_report.json, anomaly_overview.png" + (", anomaly_validation.json/.png, anomaly_variants.csv, "
++                                                         "anomaly_event_variants.csv" if validation else "") + " in", PROCESSED_DIR)
+ 
+ 
+ if __name__ == "__main__":
+diff -ruN '--exclude=__pycache__' a/src/anomaly_validation.py b/src/anomaly_validation.py
+--- a/src/anomaly_validation.py	1970-01-01 00:00:00.000000000 +0000
++++ b/src/anomaly_validation.py	2026-11-08 16:32:03.487466750 +0000
+@@ -0,0 +1,500 @@
++"""Statistical validation of anomaly episodes (called by anomaly.py; also runnable on its own).
++
++A robust z-score above 3 does not prove that an event is exceptional. This module asks, for every episode of the
++production analysis, the questions a sceptical reviewer would:
++
++ 1. Seasonality      : is the seasonal cycle really removed?  (residual z by month; a no-season negative control)
++ 2. Extreme values   : do a few extreme observations distort the baseline?  (classical mean/SD vs median/MAD,
++                       IQR scale, how far the baselines differ)
++ 3. Missing data     : do missing observations create artificial anomalies?  (days re-admitted, low flags next to gaps,
++                       random data loss, random multi-day outages)
++ 4. Baseline period  : does the result survive a different baseline?  (window width, earlier / later half of the years,
++                       neighbouring years skipped, causal past-only baseline, annual level removed)
++ 5. Robust alternative: same episodes under an IQR scale and under the classical z; where the peak day sits in the
++                       distribution-free pool of same-season values of the other years
++ 6. Null model       : how often would ordinary variability produce an episode like this?  (empirical-null tail
++                       counts and a Monte-Carlo AR(1) record with Gaussian and heavy-tailed (Student-t) marginals,
++                       parameters estimated from the NON-event days only)
++
++Each episode gets `robustness` = ROBUST / MODERATE / FRAGILE (share of the consensus variants and of the random
++data-loss replicates in which it is still detected, whichever is lower). It is a statement about the statistics, not a
++proof that the fire activity was exceptional: sensor, processing and land-cover changes are not testable from FRP alone.
++"""
++import json
++
++import numpy as np
++import pandas as pd
++from scipy import signal, stats
++
++from src import anomaly as A
++from src.config import PROCESSED_DIR, ANOM_Z, ANOM_WINDOW_DAYS, ANOM_REPLICATES, ANOM_NULL_SIMS, ANOM_DETREND
++
++EVENT_PAD = 2                      # a variant "detects" an episode if one of its episodes overlaps it +- this many days
++ROBUST_FRAC, MODERATE_FRAC = 0.8, 0.5
++NULL_THRESHOLDS = (2.0, 2.5, 3.0, 3.5, 4.0)
++MIN_YEARS_FOR_PERIOD_SPLIT = 6
++MIN_POOL_TESTABLE = 45             # a variant only tests an episode if its baseline holds >= 45 values (~3 years of +-7 d)
++
++
++# --------------------------------------------------------------------------- helpers
++def _event_positions(df, events):
++    """[(first_pos, last_pos)] of every production episode in the daily index."""
++    out = []
++    for _, e in events.iterrows():
++        out.append((df.index.get_loc(pd.Timestamp(e["start"])), df.index.get_loc(pd.Timestamp(e["end"]))))
++    return out
++
++
++def _overlaps(slices, a, b, pad=EVENT_PAD):
++    return any(s <= b + pad and e >= a - pad for s, e in slices)
++
++
++def _protect_mask(n, pos, margin):
++    m = np.zeros(n, bool)
++    for a, b in pos:
++        m[max(0, a - margin): b + margin + 1] = True
++    return m
++
++
++def variant_specs(cal):
++    """(name, family, score-kwargs, in_consensus). Consensus variants are legitimate alternative analyses of the same
++    data; the classical z, the re-admission of outage-suspect days and the no-season control are reported but not
++    counted (a method that is less sensitive by construction cannot make an episode 'fragile')."""
++    years = sorted(cal.loc[cal["valid"], "year"].unique())
++    specs = [
++        ("baseline window +-3 days", "baseline window", dict(window=3), True),
++        ("baseline window +-14 days", "baseline window", dict(window=14), True),
++        ("baseline window +-21 days", "baseline window", dict(window=21), True),
++        ("scale = IQR/1.349 instead of MAD", "scale estimator", dict(method="median_iqr"), True),
++        ("baseline skips the two neighbouring years", "baseline period", dict(pool="skip_neighbours"), True),
++        ("baseline = earlier years only (causal)", "baseline period", dict(pool="past"), True),
++        (("annual level kept" if ANOM_DETREND else "annual level removed (trend-robust)"), "trend",
++         dict(level_adjust=not ANOM_DETREND), True),
++    ]
++    if len(years) >= MIN_YEARS_FOR_PERIOD_SPLIT:
++        h = len(years) // 2
++        specs += [
++            (f"baseline = {years[0]}-{years[h - 1]} only", "baseline period", dict(pool=set(years[:h])), True),
++            (f"baseline = {years[h]}-{years[-1]} only", "baseline period", dict(pool=set(years[h:])), True),
++        ]
++    specs += [("classical mean / SD z-score", "classical z (not robust)", dict(method="mean_sd"), False)]
++    if "value_measured" in cal.columns and "status" in cal.columns:
++        with_low = cal["status"].isin(("measured", "measured_zero", "measured_low_coverage")).to_numpy()
++        if (with_low != cal["valid"].to_numpy()).any():
++            specs.append(("outage-suspect days re-admitted", "missing data", dict(valid=with_low), False))
++    specs.append(("NO seasonal baseline (whole year pooled)", "negative control", dict(window=183), False))
++    return specs
++
++
++def _window(df, e, pad=0):
++    a, b = df.index.get_loc(pd.Timestamp(e["start"])), df.index.get_loc(pd.Timestamp(e["end"]))
++    return max(0, a - pad), min(len(df) - 1, b + pad)
++
++
++# --------------------------------------------------------------------------- 1-2-4-5: variants
++def run_variants(cal, df, events):
++    """Every variant re-scores the whole record; returns (summary rows, long per-event rows, scored frames)."""
++    pos = _event_positions(df, events)
++    rows, long_rows, frames = [], [], {}
++    specs = [("production analysis", "production", {}, False)] + variant_specs(cal)
++    for name, family, kw, consensus in specs:
++        d = df if not kw else A.score(cal, **kw)
++        frames[name] = d
++        z = d["z"].to_numpy()
++        sl = A.episode_slices(z)
++        rows.append({
++            "variant": name, "family": family, "in_consensus": bool(consensus),
++            "days_scored": int(np.isfinite(z).sum()), "high_days": int((d["flag"] == "high").sum()),
++            "low_days": int((d["flag"] == "low").sum()), "episodes": len(sl),
++            "episode_spans": "; ".join(f"{d.index[a].date()}..{d.index[b].date()}" for a, b in sl)})
++        for i, (a, b) in enumerate(pos):
++            win = z[max(0, a - EVENT_PAD): b + EVENT_PAD + 1]
++            own = z[a: b + 1]
++            long_rows.append({
++                "event_id": f"E{i + 1}", "variant": name, "family": family, "in_consensus": bool(consensus),
++                "testable": bool(np.isfinite(own).any() and d["pool_n"].iloc[a: b + 1].max() >= MIN_POOL_TESTABLE),
++                "detected": bool(_overlaps(sl, a, b)),
++                "peak_z": float(np.nanmax(win)) if np.isfinite(win).any() else float("nan")})
++    return pd.DataFrame(rows), pd.DataFrame(long_rows), frames
++
++
++# --------------------------------------------------------------------------- 3: random data loss
++def thinning_experiments(cal, df, events, reps, seed=11):
++    """Re-score after losing data at random. The episode days themselves (+- 5 days) are never removed, so this tests
++    the effect of missing data on the BASELINE and on false alarms, not the trivial loss of the event itself."""
++    rng = np.random.default_rng(seed)
++    pos = _event_positions(df, events)
++    n = len(df)
++    protect = _protect_mask(n, pos, 5)
++    base_valid = df["valid"].to_numpy()
++    years = df["year"].to_numpy()
++    scenarios = {"random 10% of days lost": "iid10", "random 25% of days lost": "iid25",
++                 "three random 15-day outages per year": "blocks"}
++    out = {}
++    for label, kind in scenarios.items():
++        det = np.zeros((reps, len(pos)), bool)
++        new_eps = np.zeros(reps)
++        for r in range(reps):
++            drop = np.zeros(n, bool)
++            if kind in ("iid10", "iid25"):
++                drop = rng.random(n) < (0.10 if kind == "iid10" else 0.25)
++            else:
++                for y in np.unique(years):
++                    idx = np.flatnonzero(years == y)
++                    for st in rng.integers(0, max(len(idx) - 15, 1), 3):
++                        drop[idx[st]: idx[st] + 15] = True
++            drop &= ~protect
++            d = A.score(cal, valid=base_valid & ~drop)
++            sl = A.episode_slices(d["z"].to_numpy())
++            for i, (a, b) in enumerate(pos):
++                det[r, i] = _overlaps(sl, a, b)
++            new_eps[r] = sum(not any(s <= b + EVENT_PAD and e >= a - EVENT_PAD for a, b in pos) for s, e in sl)
++        out[label] = {"replicates": int(reps), "detection_rate_per_event": [float(x) for x in det.mean(axis=0)],
++                      "new_episodes_per_record_mean": float(new_eps.mean()),
++                      "records_with_any_new_episode": float((new_eps > 0).mean())}
++    return out
++
++
++# --------------------------------------------------------------------------- 1: seasonality
++def seasonality_checks(df, naive):
++    z = df["z"]
++    ok = z.notna()
++    month = df.index.month
++    groups = [z[ok & (month == m)].to_numpy() for m in range(1, 13)]
++    groups = [g for g in groups if len(g) > 5]
++    med = {int(m): float(np.median(z[ok & (month == m)])) for m in range(1, 13) if (ok & (month == m)).sum() > 5}
++    spread = {int(m): float(stats.median_abs_deviation(z[ok & (month == m)], scale="normal"))
++              for m in range(1, 13) if (ok & (month == m)).sum() > 5}
++    clim = df["value"].groupby(month).median()
++    peak_months = list(clim.sort_values(ascending=False).index[:3])
++
++    def share(d):
++        h = d.index[d["flag"] == "high"]
++        return None if len(h) == 0 else float(np.isin(h.month, peak_months).mean())
++
++    return {
++        "monthly_median_z": med, "monthly_robust_sd_z": spread,
++        "max_abs_monthly_median_z": float(max(abs(v) for v in med.values())),
++        "kruskal_wallis_p_location": float(stats.kruskal(*groups).pvalue) if len(groups) > 2 else None,
++        "brown_forsythe_p_scale": float(stats.levene(*groups, center="median").pvalue) if len(groups) > 2 else None,
++        "reading": ("monthly median z close to 0 and robust SD close to 1 mean the seasonal cycle is removed; with ~4000 "
++                    "days the tests detect tiny departures, so judge the effect sizes (max_abs_monthly_median_z)."),
++        "highest_climatology_months": [int(m) for m in peak_months],
++        "high_flags_in_peak_months": {"seasonal_baseline": share(df), "no_seasonal_baseline_control": share(naive)},
++        "high_days_by_month": {
++            "seasonal_baseline": {int(m): int(((df["flag"] == "high") & (month == m)).sum()) for m in range(1, 13)},
++            "no_seasonal_baseline_control": {int(m): int(((naive["flag"] == "high") & (naive.index.month == m)).sum()) for m in range(1, 13)}},
++        "episodes_without_seasonal_baseline": int(len(A.episode_slices(naive["z"].to_numpy()))),
++    }
++
++
++# --------------------------------------------------------------------------- 2: extreme values
++def baseline_distortion(df):
++    x = np.log1p(df["value"].to_numpy(float))
++    ok = df["valid"].to_numpy() & np.isfinite(x)
++    args = (x, df["doy"].to_numpy(), df["year"].to_numpy(), ok)
++    c1, s1, _ = A.baseline(*args, method="median_mad")
++    c2, s2, _ = A.baseline(*args, method="mean_sd")
++    f = np.isfinite(c1) & np.isfinite(c2)
++    ratio = (s2 / s1)[f]
++    shift = ((c2 - c1) / s1)[f]
++    return {
++        "sd_over_robust_sigma": {"median": float(np.median(ratio)), "p90": float(np.percentile(ratio, 90)),
++                                 "max": float(ratio.max())},
++        "mean_minus_median_in_robust_sigma": {"median": float(np.median(shift)), "p10": float(np.percentile(shift, 10)),
++                                               "p90": float(np.percentile(shift, 90))},
++        "reading": ("a ratio above 1 means the classical SD of the same-season pool is inflated by extreme values, which "
++                    "makes a classical z-score LESS sensitive; a mean far from the median means the extremes also move the "
++                    "centre. The production z uses median / MAD, so it is not affected."),
++    }
++
++
++# --------------------------------------------------------------------------- 3: missing observations
++def missing_observation_checks(cal, df, frames):
++    status = cal["status"]
++    unobs = status.isin(("viirs_not_observed", "partial_day", "absent"))
++    near_gap = unobs.shift(1, fill_value=False) | unobs.shift(-1, fill_value=False)
++    low = df["flag"] == "low"
++    out = {
++        "days_by_status": {k: int(v) for k, v in status.value_counts().items()},
++        "scored_days_that_are_not_valid": int(((~df["valid"]) & df["z"].notna()).sum()),
++        "low_flags": int(low.sum()),
++        "low_flags_next_to_an_unobserved_day": int((low & near_gap).sum()),
++        "low_flags_on_genuine_zero_days": int((low & (status == "measured_zero")).sum()),
++    }
++    name = "outage-suspect days re-admitted"
++    if name in frames:
++        d2 = frames[name]
++        l2 = d2["flag"] == "low"
++        on_susp = l2 & (status == "measured_low_coverage")
++        out.update({
++            "low_flags_if_outage_suspect_days_were_kept": int(l2.sum()),
++            "of_which_on_outage_suspect_days": int(on_susp.sum()),
++            "share_of_low_flags_explained_by_outage_suspect_days": float(on_susp.sum() / max(int(l2.sum()), 1)),
++            "high_flags_if_outage_suspect_days_were_kept": int((d2["flag"] == "high").sum()),
++            "high_flags_production": int((df["flag"] == "high").sum())})
++    out["reading"] = ("missing days are NaN (never zero) and cannot be scored; a day that lost overpasses is biased low and "
++                      "would be flagged as a 'low' anomaly, so such days are excluded from the production analysis. "
++                      "Missing observations cannot create a high anomaly; they can only make the baseline slightly noisier "
++                      "(see thinning_experiments).")
++    return out
++
++
++# --------------------------------------------------------------------------- 5: distribution-free peak position
++def pool_position(df, events, window=None):
++    """Where the peak day of each episode sits among the same-season values of the other years (no model, no scale)."""
++    window = ANOM_WINDOW_DAYS if window is None else window
++    x = np.log1p(df["value"].to_numpy(float))
++    ok = df["valid"].to_numpy() & np.isfinite(x)
++    rows = []
++    for _, e in events.iterrows():
++        d = pd.Timestamp(e["peak_date"])
++        i = df.index.get_loc(d)
++        dist = np.abs(df["doy"].to_numpy() - df["doy"].iloc[i])
++        dist = np.minimum(dist, 365 - dist)
++        pool = x[ok & (dist <= window) & (df["year"].to_numpy() != df["year"].iloc[i])]
++        if len(pool) == 0:
++            rows.append((np.nan, 0, False))
++            continue
++        rows.append(((np.sum(pool < x[i]) + 0.5 * np.sum(pool == x[i])) / len(pool), int(len(pool)), bool(x[i] > pool.max())))
++    return rows
++
++
++# --------------------------------------------------------------------------- 6: null model
++def null_calibration(df, events, n_sims, seed=5):
++    """What ordinary variability alone would produce.
++
++    The null is estimated from the NON-event days (event days +-3 removed), so the episodes do not define their own null:
++      - empirical null: centre and scale of the central part of z; expected number of days above each threshold under a
++        Gaussian and under a heavy-tailed Student-t fitted to the non-event days; observed / expected = estimated false
++        discovery proportion of a z threshold (Efron).
++      - Monte-Carlo records with the real validity mask and the lag-1 autocorrelation of the non-event days, run through
++        the SAME episode rule; the family-wise p of an episode is the share of null records that contain an episode at
++        least as long and at least as high.
++    Both nulls are crude (stationary, one lag of memory); the t null is the one to read. Neither models changes of
++    sensor, algorithm or land cover."""
++    z = df["z"].to_numpy(float)
++    fin = np.isfinite(z)
++    pos = _event_positions(df, events)
++    ev = _protect_mask(len(z), pos, 3)
++    zm = np.where(fin & ~ev, z, np.nan)
++    zn = zm[np.isfinite(zm)]
++    mu0 = float(np.median(zn))
++    s0 = float(stats.iqr(zn) / 1.349)
++    nu, loc, scale = (float(v) for v in stats.t.fit(zn))
++    a, b = zm[:-1], zm[1:]
++    okp = np.isfinite(a) & np.isfinite(b)
++    phi = float(np.clip(np.corrcoef(a[okp], b[okp])[0, 1], 0.0, 0.95))
++    n_fin = int(fin.sum())
++    tails = []
++    for t in NULL_THRESHOLDS:
++        obs = int((z[fin] >= t).sum())
++        eg = float(n_fin * stats.norm.sf((t - mu0) / s0))
++        et = float(n_fin * stats.t.sf((t - loc) / scale, nu))
++        tails.append({"z_threshold": t, "observed_days": obs, "expected_gaussian_null": eg, "expected_t_null": et,
++                      "false_discovery_proportion_gaussian": min(1.0, eg / obs) if obs else None,
++                      "false_discovery_proportion_t": min(1.0, et / obs) if obs else None})
++    rng = np.random.default_rng(seed)
++    n = len(z)
++    spans = {"gaussian": [], "t": []}
++    peaks = {"gaussian": [], "t": []}
++    counts = {"gaussian": np.zeros(n_sims), "t": np.zeros(n_sims)}
++    done = 0
++    while done < n_sims:
++        k = min(500, n_sims - done)
++        g = signal.lfilter([np.sqrt(1 - phi ** 2)], [1, -phi], rng.standard_normal((k, n)), axis=1)
++        sims = {"gaussian": mu0 + s0 * g, "t": loc + scale * stats.t.ppf(stats.norm.cdf(g), nu)}
++        for kind, zz in sims.items():
++            zz[:, ~fin] = np.nan
++            for r in range(k):
++                sl = A.episode_slices(zz[r])
++                counts[kind][done + r] = len(sl)
++                spans[kind].append(np.array([e - s + 1 for s, e in sl], int))
++                peaks[kind].append(np.array([np.nanmax(zz[r][s: e + 1]) for s, e in sl], float))
++        done += k
++    per_event = []
++    for i, (a_, b_) in enumerate(pos):
++        span, pk = b_ - a_ + 1, float(np.nanmax(z[a_: b_ + 1]))
++        rec = {"event_id": f"E{i + 1}", "span_days": int(span), "peak_z": pk}
++        for kind in ("gaussian", "t"):
++            hit = sum(bool(((sp >= span) & (p >= pk)).any()) for sp, p in zip(spans[kind], peaks[kind]))
++            rec[f"p_family_{kind}"] = float((hit + 1) / (n_sims + 1))
++        per_event.append(rec)
++    n_obs = len(pos)
++    return {
++        "null_parameters": {"centre": mu0, "scale": s0, "student_t": {"df": nu, "loc": loc, "scale": scale},
++                            "lag1_autocorrelation": phi, "non_event_days": int(len(zn)), "simulated_records": int(n_sims)},
++        "tail_counts": tails,
++        "episodes": {"observed": n_obs,
++                     "expected_per_record_gaussian": float(counts["gaussian"].mean()),
++                     "expected_per_record_t": float(counts["t"].mean()),
++                     "p_at_least_observed_count_gaussian": float(((counts["gaussian"] >= n_obs).sum() + 1) / (n_sims + 1)),
++                     "p_at_least_observed_count_t": float(((counts["t"] >= n_obs).sum() + 1) / (n_sims + 1))},
++        "per_event": per_event,
++        "reading": ("p_family = chance that a record of this length and gap pattern contains an episode at least this long "
++                    "and this high by ordinary variability alone. It is an order-of-magnitude screen under a stationary "
++                    "model, not a significance claim about fire regimes."),
++    }
++
++
++def annual_level_trend(df):
++    v = np.log1p(df["value"])
++    g = v.groupby(df["year"]).agg(["median", "count"])
++    g = g[g["count"] >= 300]
++    if len(g) < 5:
++        return {"note": "fewer than 5 complete years"}
++    tau, p = stats.kendalltau(g.index.to_numpy(), g["median"].to_numpy())
++    slope = stats.theilslopes(g["median"].to_numpy(), g.index.to_numpy())[0]
++    return {"years": [int(y) for y in g.index], "kendall_tau": float(tau), "p": float(p),
++            "theil_sen_log_change_per_year": float(slope), "relative_change_per_year": float(np.expm1(slope)),
++            "reading": ("a significant trend means the leave-one-year-out baseline mixes different activity levels; the "
++                        "'annual level removed' variant checks that this does not create or hide episodes.")}
++
++
++# --------------------------------------------------------------------------- orchestration
++def label(frac):
++    return "ROBUST" if frac >= ROBUST_FRAC else ("MODERATE" if frac >= MODERATE_FRAC else "FRAGILE")
++
++
++def validate(cal, df, events):
++    """Run every check; returns a dict with the augmented episode table (`events`), the tables and the JSON report."""
++    ev = events.copy()
++    summary, long, frames = run_variants(cal, df, ev)
++    naive = frames["NO seasonal baseline (whole year pooled)"]
++    thin = thinning_experiments(cal, df, ev, ANOM_REPLICATES) if len(ev) else {}
++    null = null_calibration(df, ev, ANOM_NULL_SIMS) if len(ev) else None
++    pp = pool_position(df, ev) if len(ev) else []
++
++    ev.insert(0, "event_id", [f"E{i + 1}" for i in range(len(ev))])
++    cols = {k: [] for k in ("variants_testable", "variants_detected", "detected_fraction", "thinning_detection_rate",
++                            "robustness", "detected_by_classical_z", "peak_z_min_over_variants",
++                            "peak_z_median_over_variants", "peak_pool_percentile", "peak_pool_n",
++                            "peak_exceeds_all_pool", "null_p_family_t", "null_p_family_gaussian", "assessment")}
++    for i, eid in enumerate(ev["event_id"]):
++        L = long[long["event_id"] == eid]
++        cons = L[L["in_consensus"] & L["testable"]]
++        n_t, n_d = int(len(cons)), int(cons["detected"].sum())
++        frac = n_d / n_t if n_t else float("nan")
++        rates = [thin[s]["detection_rate_per_event"][i] for s in thin] if thin else []
++        thin_rate = float(np.mean(rates)) if rates else float("nan")
++        worst = np.nanmin([frac, thin_rate]) if (np.isfinite(frac) or np.isfinite(thin_rate)) else float("nan")
++        classical = L[L["variant"] == "classical mean / SD z-score"]
++        cl = bool(classical["detected"].iloc[0]) if len(classical) else None
++        pk = L[L["variant"] != "NO seasonal baseline (whole year pooled)"]["peak_z"].dropna()
++        pct, npool, above = pp[i]
++        nf = null["per_event"][i] if null else {}
++        rob = label(worst) if np.isfinite(worst) else "NOT_TESTABLE"
++        for k, v in (("variants_testable", n_t), ("variants_detected", n_d), ("detected_fraction", frac),
++                     ("thinning_detection_rate", thin_rate), ("robustness", rob), ("detected_by_classical_z", cl),
++                     ("peak_z_min_over_variants", float(pk.min()) if len(pk) else np.nan),
++                     ("peak_z_median_over_variants", float(pk.median()) if len(pk) else np.nan),
++                     ("peak_pool_percentile", pct), ("peak_pool_n", npool), ("peak_exceeds_all_pool", above),
++                     ("null_p_family_t", nf.get("p_family_t")), ("null_p_family_gaussian", nf.get("p_family_gaussian"))):
++            cols[k].append(v)
++        cols["assessment"].append(
++            f"{rob}: detected in {n_d}/{n_t} consensus variants and {thin_rate:.0%} of data-loss replicates; "
++            f"{'also' if cl else 'NOT'} found by the classical z; peak day above {pct:.1%} of {npool} same-season values "
++            f"of other years{' (a new maximum)' if above else ''}; family-wise p under the heavy-tailed null "
++            f"{nf.get('p_family_t', float('nan')):.3f}. Statistical candidate only.")
++    for k, v in cols.items():
++        ev[k] = v
++
++    seas = seasonality_checks(df, naive)
++    dist = baseline_distortion(df)
++    miss = missing_observation_checks(cal, df, frames)
++    counts = ev["robustness"].value_counts().to_dict() if len(ev) else {}
++    text = (f"{len(ev)} episode(s): " + ", ".join(f"{v} {k}" for k, v in counts.items()) if len(ev) else "no episodes") + \
++           f"; {miss['low_flags']} low-flag days ({miss['low_flags_next_to_an_unobserved_day']} next to an unobserved day); " \
++           f"without a seasonal baseline the same analysis would find {seas['episodes_without_seasonal_baseline']} episode(s)"
++    report = {
++        "summary": text,
++        "definitions": {"event_overlap_padding_days": EVENT_PAD, "robust_fraction": ROBUST_FRAC, "moderate_fraction": MODERATE_FRAC,
++                        "consensus_variants": [r["variant"] for r in summary.to_dict("records") if r["in_consensus"]],
++                        "min_baseline_values_for_a_variant_to_count": MIN_POOL_TESTABLE,
++                        "robustness_rule": "min(share of consensus variants that still detect the episode, share of random "
++                                           "data-loss replicates that still detect it); >= 0.8 ROBUST, >= 0.5 MODERATE, else FRAGILE"},
++        "seasonality": seas, "extreme_values": dist, "missing_observations": miss,
++        "thinning_experiments": thin, "annual_level_trend": annual_level_trend(df), "null_model": null,
++        "episodes": ev.to_dict("records"),
++    }
++    return {"events": ev, "variants": summary, "event_variants": long, "report": report, "summary_text": text,
++            "naive": naive, "frames": {k: v for k, v in frames.items() if k in ("production analysis",
++                                                                                "classical mean / SD z-score")}}
++
++
++# --------------------------------------------------------------------------- outputs
++def _jsonable(o):
++    if isinstance(o, dict):
++        return {str(k): _jsonable(v) for k, v in o.items()}
++    if isinstance(o, (list, tuple)):
++        return [_jsonable(v) for v in o]
++    if isinstance(o, (np.bool_, bool)):
++        return bool(o)
++    if isinstance(o, (np.integer,)):
++        return int(o)
++    if isinstance(o, (float, np.floating)):
++        return float(o) if np.isfinite(o) else None
++    if isinstance(o, (pd.Timestamp, np.datetime64)) or hasattr(o, "isoformat"):
++        return str(o)
++    return o
++
++
++def plot_validation(v, df, path):
++    import matplotlib
++    matplotlib.use("Agg")
++    import matplotlib.pyplot as plt
++    BLUE, ORANGE, GREY, INK = "#2a78d6", "#eb6834", "#8a8a85", "#33322f"
++    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
++    L = v["event_variants"]
++    ax = axes[0]
++    ids = list(v["events"]["event_id"])
++    for i, eid in enumerate(ids):
++        g = L[(L["event_id"] == eid) & (L["variant"] != "NO seasonal baseline (whole year pooled)")]
++        ax.scatter(g["peak_z"], [i] * len(g), s=22, color=[BLUE if c else GREY for c in g["in_consensus"]], alpha=0.8)
++    ax.axvline(ANOM_Z, color=ORANGE, ls="--", lw=1, label=f"episode threshold z = {ANOM_Z:g}")
++    ax.set_yticks(range(len(ids)), [f"{e}\n{v['events']['start'].iloc[i]}" for i, e in enumerate(ids)], fontsize=8)
++    ax.set_xlabel("peak z over the episode window"); ax.set_title("Peak z of each episode under every variant\n(blue = consensus, grey = informational)")
++    ax.legend(fontsize=8); ax.grid(True, axis="x", alpha=0.3)
++    ax = axes[1]
++    s = v["report"]["seasonality"]["high_days_by_month"]
++    m = np.arange(1, 13)
++    ax.bar(m - 0.2, [s["seasonal_baseline"][k] for k in m], 0.4, color=BLUE, label="seasonal baseline (production)")
++    ax.bar(m + 0.2, [s["no_seasonal_baseline_control"][k] for k in m], 0.4, color=GREY, label="no seasonal baseline (control)")
++    ax.set_xticks(m); ax.set_xlabel("month"); ax.set_ylabel("days flagged high")
++    ax.set_title("Days flagged high, by month\n(seasonal baseline vs no-season negative control)"); ax.legend(fontsize=8)
++    ax = axes[2]
++    nm = v["report"]["null_model"]
++    if nm:
++        z = df["z"].dropna().to_numpy()
++        zz = np.linspace(max(z.min(), -6), z.max() + 0.5, 300)
++        ax.hist(z, bins=60, density=True, color=BLUE, alpha=0.35, label="all scored days")
++        p = nm["null_parameters"]
++        ax.plot(zz, stats.norm.pdf(zz, p["centre"], p["scale"]), color=INK, lw=1.2, label="Gaussian null")
++        t = p["student_t"]
++        ax.plot(zz, stats.t.pdf((zz - t["loc"]) / t["scale"], t["df"]) / t["scale"], color=ORANGE, lw=1.5, label=f"Student-t null (df {t['df']:.1f})")
++        ax.set_yscale("log"); ax.set_ylim(1e-5, 2)
++        ax.set_xlabel("robust z"); ax.set_title("Distribution of z (all scored days) and the nulls\nfitted on the non-event days only")
++        ax.legend(fontsize=8)
++    fig.tight_layout()
++    fig.savefig(path, dpi=150)
++    plt.close(fig)
++
++
++def write_outputs(v, df):
++    (PROCESSED_DIR / "anomaly_validation.json").write_text(json.dumps(_jsonable(v["report"]), indent=2))
++    v["variants"].to_csv(PROCESSED_DIR / "anomaly_variants.csv", index=False)
++    v["event_variants"].to_csv(PROCESSED_DIR / "anomaly_event_variants.csv", index=False)
++    plot_validation(v, df, PROCESSED_DIR / "anomaly_validation.png")
++
++
++def main():
++    cal = A.load_series()
++    df = A.score(cal)
++    ev = A.find_events(df)
++    v = validate(cal, df, ev)
++    write_outputs(v, df)
++    print(v["summary_text"])
++
++
++if __name__ == "__main__":
++    main()
+diff -ruN '--exclude=__pycache__' a/src/config.py b/src/config.py
+--- a/src/config.py	2026-11-07 12:09:27.000000000 +0000
++++ b/src/config.py	2026-11-08 16:31:28.890478451 +0000
+@@ -50,10 +50,41 @@
+ # VIIRS satellite used as the calendar reference. Default: the one observed on the most days.
+ REF_SAT = os.getenv("PYRO_REF_SAT") or None
+ 
++# --- Harmonization hardening (harmonize.py, harmonize_validation.py) ---
++# A MODIS satellite is only given a scale k when it has its OWN close-in-time matches with VIIRS. By default a
++# satellite without them (e.g. Terra vs S-NPP: ~150 min apart) gets NO VIIRS-equivalent FRP (NaN), instead of
++# silently inheriting another satellite's k. PYRO_APPLY_UNVALIDATED_K=1 applies an own low-trust fit, or the k of
++# the best-validated satellite, and labels every such value (scale_basis) as unvalidated.
++APPLY_UNVALIDATED_K = os.getenv("PYRO_APPLY_UNVALIDATED_K", "0") == "1"
++# Cluster-bootstrap replicates for every confidence interval on k (10 000 keeps the Monte-Carlo error of a 95 %
++# interval width well below 1 percentage point, so a trust grade cannot flip because of the random seed).
++N_BOOT = int(os.getenv("PYRO_N_BOOT", 10_000))
++# k_trust can only be HIGH if the 95 % upper limit of the between-year SD of log k (tau) is at most this value.
++K_TAU_MAX = float(os.getenv("PYRO_K_TAU_MAX", 0.15))
++# Grid sizes (degrees) of the spatial-aggregation sensitivity analysis (harmonize_validation.grid_sensitivity).
++GRID_SENS_DEG = tuple(float(x) for x in (os.getenv("PYRO_GRID_SENS") or "0.05,0.1,0.25,0.5,1,2").split(","))
++# Partial-outage detector for the reference VIIRS series (see harmonize.flag_low_coverage). A day is flagged when
++#   (a) it has <= 1 overpass cluster AND fewer than COV_MIN_FRAC x the local median number of detections, or
++#   (b) it has fewer than COV_EXTREME_FRAC x the local median number of detections (a level reached by < 1 % of days),
++# but only where at least COV_MIN_EXPECTED detections per day are normal (a sparse region cannot reveal an outage this way).
++COV_MIN_FRAC = float(os.getenv("PYRO_COV_MIN_FRAC", 0.5))
++COV_EXTREME_FRAC = float(os.getenv("PYRO_COV_EXTREME_FRAC", 0.2))
++COV_MIN_EXPECTED = float(os.getenv("PYRO_COV_MIN_EXPECTED", 20))
++COV_CLUSTER_GAP_MIN = float(os.getenv("PYRO_COV_GAP_MIN", 25))   # minutes between detections that start a new overpass
++
+ # --- Anomalies and critical burning windows (anomaly.py) ---
+ ANOM_MIN_YEARS = int(os.getenv("PYRO_ANOM_MIN_YEARS", 5))   # fewer valid years -> flagged UNRELIABLE
+ ANOM_Z = float(os.getenv("PYRO_ANOM_Z", 3.0))               # robust z for an anomalous day
+ ANOM_WINDOW_DAYS = int(os.getenv("PYRO_ANOM_WINDOW", 7))    # +- days of season used for the baseline
+ CRIT_PCT = float(os.getenv("PYRO_CRIT_PCT", 75))            # percentile of the climatology = "critical"
++# Statistical validation of the anomaly episodes (anomaly_validation.py). Set PYRO_ANOM_VALIDATE=0 to skip it.
++ANOM_VALIDATE = os.getenv("PYRO_ANOM_VALIDATE", "1") != "0"
++ANOM_INCLUDE_LOW_COVERAGE = os.getenv("PYRO_ANOM_INCLUDE_LOW_COVERAGE", "0") == "1"  # keep outage-suspect days in the analysis
++# PYRO_ANOM_DETREND=1 removes each year's median level before scoring. Off by default (keeps the baseline definition
++# of earlier runs), but anomaly_validation.json reports the annual-level trend and the effect of removing it: a
++# significant trend makes the leave-one-year-out baseline too low for early years and too high for late years.
++ANOM_DETREND = os.getenv("PYRO_ANOM_DETREND", "0") == "1"
++ANOM_REPLICATES = int(os.getenv("PYRO_ANOM_REPLICATES", 30))   # random-thinning replicates per scenario
++ANOM_NULL_SIMS = int(os.getenv("PYRO_ANOM_NULL_SIMS", 2000))   # Monte-Carlo records for the false-alarm null
+ 
+ PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+diff -ruN '--exclude=__pycache__' a/src/harmonize.py b/src/harmonize.py
+--- a/src/harmonize.py	2026-11-07 12:11:04.000000000 +0000
++++ b/src/harmonize.py	2026-11-09 03:40:08.396124610 +0000
+@@ -2,35 +2,48 @@
+ 
+ Steps
+  1. Load the standardized CSVs and clamp both sensors to their COMMON time window.
+- 2. Footprint-aware matching: every VIIRS 375 m pixel whose centre falls inside a MODIS pixel
+-    footprint (scan x track) within +-MATCH_MAX_MIN is assigned to ONE MODIS pixel (nearest
+-    centre), so overlapping MODIS footprints at the swath edge never double-count VIIRS FRP.
+- 3. Estimate a constant aggregate FRP scale  k = sum(VIIRS footprint FRP) / sum(MODIS FRP)
+-    with a cell-clustered bootstrap CI and a chronological hold-out check. (A pixel-level
+-    regression was tested and rejected: pixel FRP is only weakly predictable across sensors
+-    and a log-log fit under-predicts totals.)
+- 4. Build the calendar on a reference (VIIRS-equivalent) scale. MODIS is scaled onto it;
+-    sensors are NEVER summed (a detection is an observation, not a fire).
++ 2. Footprint-aware matching: every VIIRS 375 m pixel whose centre falls inside a MODIS pixel footprint
++    (scan x track) within +-MATCH_MAX_MIN is assigned to ONE MODIS pixel (nearest centre), so overlapping MODIS
++    footprints at the swath edge never double-count VIIRS FRP. Each MODIS satellite is matched separately.
++ 3. Estimate a constant aggregate FRP scale  k = sum(VIIRS footprint FRP) / sum(MODIS FRP)  FOR EACH MODIS
++    SATELLITE SEPARATELY, from matches within K_FIT_MAX_DT_MIN minutes only, with a cell-clustered bootstrap CI,
++    per-year estimates, a between-year heterogeneity analysis (Cochran Q, I^2, tau with a Q-profile interval), a
++    prediction interval for an unseen year and a chronological hold-out. A satellite that has no close-in-time
++    matches (Terra vs S-NPP: ~150 min apart) gets NO k and NO VIIRS-equivalent FRP; its k is never borrowed from
++    another satellite unless PYRO_APPLY_UNVALIDATED_K=1, and then every value is labelled.
++ 4. Build the calendar on the VIIRS reference scale. A day with no detections is NOT a day without observations:
++    every sensor-level number is NaN (not 0) on a day the sensor did not deliver data, and `harmonized_status` says
++    exactly what a row is (measured / measured_zero / measured_low_coverage / viirs_not_observed / partial_day).
++    MODIS is never substituted for a missing VIIRS day (it sees ~3-5x less FRP than VIIRS and predicts VIIRS daily
++    totals poorly: see `daily_total_relationship` in frp_mapping.json) and sensors are never summed.
++ 5. Diagnostics (harmonize_validation.py): what k depends on, and how the 0.5 deg aggregation grid changes the
++    cell-level numbers.
+ 
+ Run:  python -m src.harmonize
+ """
+ import json
++import re
+ from itertools import chain
+ from pathlib import Path
+ 
+ import numpy as np
+ import pandas as pd
++from scipy import stats
+ from scipy.spatial import cKDTree
+ 
++from src import harmonize_validation as hv
+ from src.config import (
+     PROCESSED_DIR, BBOX, START_DATE, END_DATE, CELL_DEG, MATCH_MAX_MIN, DAY_TOL_MIN, MIN_PAIRS_FIT,
+     K_FIT_MAX_DT_MIN, K_TRUST_MIN_PAIRS, MAX_ROWS, REF_SAT, AOI_FILE, EXCLUDE_STATIC,
++    APPLY_UNVALIDATED_K, N_BOOT, K_TAU_MAX, GRID_SENS_DEG, COV_MIN_FRAC, COV_EXTREME_FRAC, COV_MIN_EXPECTED, COV_CLUSTER_GAP_MIN,
++)
++from src.kstats import (
++    KM_PER_DEG, R_KM, cell_area_km2, heterogeneity, infer_missing_days, prediction_interval, ratio_ci,
+ )
+ 
+-R_KM = 6371.0088
+-KM_PER_DEG = R_KM * np.pi / 180.0
+ VIIRS_I4_SATURATION_K = 367.0
+-N_BOOT = 1000
++MIN_CELLS_FIT = 10          # fewer clusters than this: the cluster bootstrap is meaningless
++MIN_YEAR_CELLS = 10
+ 
+ WANTED = {
+     "sensor_family", "source_satellite", "latitude", "longitude", "acq_datetime_utc",
+@@ -38,6 +51,11 @@
+ }
+ 
+ 
++def slug(name) -> str:
++    """'S-NPP' -> 'snpp', 'Aqua' -> 'aqua' (column-name prefix)."""
++    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
++
++
+ # --------------------------------------------------------------------------- loading
+ def load(path):
+     path = Path(path)
+@@ -65,43 +83,30 @@
+     return df["acq_datetime_utc"].min(), df["acq_datetime_utc"].max()
+ 
+ 
+-def observed_days(label):
+-    """UTC days that are really PRESENT in the raw file, or None for runs made before this feature.
+-    A day with no rows is MISSING (not 'no fire') when an empty day is implausible for that file:
+-      - high-volume files (median >= 100 rows/day around the gap): any empty day is a gap;
+-      - otherwise a run of L empty days is a gap if p0**L < 0.001, where p0 is the share of empty days in the
+-        30 days before and after the run (so sparse regional files only reveal long gaps)."""
++def observed_days(label, satellite=None):
++    """(set of UTC days PRESENT in the raw file, basis) or (None, 'unavailable') for runs made before this feature.
++
++    A day with no rows is MISSING (not 'no fire') when an empty day is implausible for that file at that time
++    (kstats.infer_missing_days: negative-binomial model of a normal day from the +-30 surrounding days). When the
++    coverage file holds per-satellite counts and `satellite` is given, the test is run on THAT satellite alone, so
++    an outage of one satellite is not hidden by another satellite's rows."""
+     p = PROCESSED_DIR / f"{label}_coverage.json"
+     if not p.exists():
+-        return None
++        return None, "unavailable"
+     d = json.loads(p.read_text())
+     if "raw_rows_per_day" not in d:
+-        return None
++        return None, "unavailable"
++    rows, basis = d["raw_rows_per_day"], "sensor-level raw rows per day"
++    if satellite is not None and "raw_rows_per_day_by_satellite" in d:
++        rows = d["raw_rows_per_day_by_satellite"].get(satellite, {})
++        basis = f"{satellite} raw rows per day"
+     full = pd.date_range(pd.Timestamp(d["start_utc"]).tz_localize(None).floor("D"),
+                          pd.Timestamp(d["end_utc"]).tz_localize(None).floor("D"), freq="D")
+-    s = pd.Series(d["raw_rows_per_day"])
++    s = pd.Series(rows, dtype=float)
+     s.index = pd.to_datetime(s.index)
+     cnt = s.reindex(full, fill_value=0).to_numpy(float)
+-    missing = np.zeros(len(cnt), dtype=bool)
+-    i = 0
+-    while i < len(cnt):
+-        if cnt[i] > 0:
+-            i += 1
+-            continue
+-        j = i
+-        while j + 1 < len(cnt) and cnt[j + 1] == 0:
+-            j += 1
+-        run = j - i + 1
+-        around = np.r_[cnt[max(0, i - 30):i], cnt[j + 1:j + 31]]
+-        if len(around) == 0:
+-            gap = run >= 7
+-        else:
+-            p0 = (np.sum(around == 0) + 1.0) / (len(around) + 2.0)
+-            gap = bool(np.median(around) >= 100 or p0 ** run < 0.001)
+-        if gap:
+-            missing[i:j + 1] = True
+-        i = j + 1
+-    return set(full[~missing])
++    missing = infer_missing_days(cnt)
++    return set(full[~missing]), basis
+ 
+ 
+ def clamp_to_common_window(m, v):
+@@ -130,17 +135,18 @@
+     return s.index[-1]
+ 
+ 
+-def add_features(df):
++def add_features(df, cell_deg=None):
++    cell_deg = CELL_DEG if cell_deg is None else cell_deg
+     df = df.copy()
+     t = df["acq_datetime_utc"]
+     df["date"] = t.dt.floor("D").dt.tz_localize(None)
+     df["lst_h"] = ((t.dt.hour + t.dt.minute / 60.0) + df["longitude"] / 15.0) % 24
+     df["area_km2"] = df["scan"] * df["track"]
+-    cell_i = np.floor((df["latitude"] + 90.0) / CELL_DEG).astype("int64")
+-    cell_j = np.floor((df["longitude"] + 180.0) / CELL_DEG).astype("int64")
++    cell_i = np.floor((df["latitude"] + 90.0) / cell_deg).astype("int64")
++    cell_j = np.floor((df["longitude"] + 180.0) / cell_deg).astype("int64")
+     df["cell_id"] = cell_i * 1_000_000 + cell_j
+-    df["cell_lat"] = -90.0 + (cell_i + 0.5) * CELL_DEG
+-    df["cell_lon"] = -180.0 + (cell_j + 0.5) * CELL_DEG
++    df["cell_lat"] = -90.0 + (cell_i + 0.5) * cell_deg
++    df["cell_lon"] = -180.0 + (cell_j + 0.5) * cell_deg
+     return df
+ 
+ 
+@@ -224,27 +230,49 @@
+     return u.sort_values("acq_datetime_utc")
+ 
+ 
+-def k_trust(use, used_all_gaps, lo, hi, k):
+-    """Grade k (HIGH / MEDIUM / LOW) and list exactly what is missing for HIGH."""
+-    tot_f, tot_v = use["frp"].sum(), use["viirs_frp_sum"].sum()
+-    by_year = {}
+-    for y, g in use.groupby(use["acq_datetime_utc"].dt.year):
+-        if len(g) < MIN_PAIRS_FIT:
++def _cluster_arr(df, key="cell_id"):
++    """(n_clusters, 2) = [MODIS FRP, VIIRS footprint FRP] summed per cluster."""
++    return df.groupby(key)[["frp", "viirs_frp_sum"]].sum().to_numpy()
++
++
++def _log_corr(a, b):
++    a, b = np.asarray(a, float), np.asarray(b, float)
++    if len(a) < 3 or np.std(np.log(a)) == 0 or np.std(np.log(b)) == 0:
++        return float("nan")
++    return float(np.corrcoef(np.log(a), np.log(b))[0, 1])
++
++
++def per_year_fits(use, rng):
++    """k per calendar year with a cell-clustered bootstrap SE, plus the leave-one-year-out check judged against
++    SAMPLING error: z = ln(k_other_years / k_year) / sqrt(se_year^2 + se_other_years^2). A year whose k differs by
++    30 % but whose own SE is 25 % is NOT evidence of instability."""
++    out = {}
++    yrs = use["acq_datetime_utc"].dt.year
++    for y in sorted(yrs.unique()):
++        g, rest = use[yrs == y], use[yrs != y]
++        ay, ar = _cluster_arr(g), _cluster_arr(rest)
++        if len(g) < MIN_PAIRS_FIT or len(ay) < MIN_YEAR_CELLS:
+             continue
+-        f, vv = g["frp"].sum(), g["viirs_frp_sum"].sum()
+-        k_rest = (tot_v - vv) / (tot_f - f) if tot_f > f else None
+-        by_year[str(y)] = {
+-            "n_pairs": int(len(g)), "k": float(vv / f),
+-            # k fitted on ALL OTHER years, applied to this year: predicted / actual VIIRS total (1.0 = perfect)
+-            "k_from_other_years_pred_over_actual": None if k_rest is None else float(k_rest * f / vv),
+-        }
+-    ks = [d["k"] for d in by_year.values()]
+-    spread = float((max(ks) - min(ks)) / np.median(ks)) if len(ks) >= 2 else None
++        k_y, lo, hi, se_y = ratio_ci(ay, rng, N_BOOT)
++        d = {"n_pairs": int(len(g)), "n_cells": int(len(ay)), "k": k_y, "k_ci95": [lo, hi], "se_log_k": se_y,
++             "k_from_other_years_pred_over_actual": None, "loyo_z": None}
++        if len(ar) >= MIN_YEAR_CELLS:
++            k_r, _, _, se_r = ratio_ci(ar, rng, N_BOOT)
++            d["k_from_other_years_pred_over_actual"] = float(k_r / k_y)
++            d["loyo_z"] = float(np.log(k_r / k_y) / np.sqrt(se_y ** 2 + se_r ** 2))
++        out[str(y)] = d
++    return out
++
++
++def k_trust_grade(use, k, ci, by_year, het):
++    """Grade k (HIGH / MEDIUM / LOW) and list exactly what is missing for HIGH.
++    Stability is judged against sampling error, not by the max-min spread of per-year k (see kstats.heterogeneity):
++    HIGH needs no significant between-year heterogeneity (Cochran Q p >= 0.05) AND a 95 % upper limit of the
++    between-year SD of log k (tau) of at most PYRO_K_TAU_MAX, so a 10-year record that merely CANNOT exclude large
++    year-to-year variation is not certified as stable."""
+     n_days = int(use["acq_datetime_utc"].dt.floor("D").nunique())
+-    ci_rel = float((hi - lo) / k)
++    ci_rel = float((ci[1] - ci[0]) / k)
+     problems = []
+-    if used_all_gaps:
+-        problems.append(f"fewer than {MIN_PAIRS_FIT} matched pixels within {K_FIT_MAX_DT_MIN:g} min; fitted on all time gaps")
+     if len(use) < K_TRUST_MIN_PAIRS:
+         problems.append(f"{len(use)} matched pixels (need >= {K_TRUST_MIN_PAIRS})")
+     if n_days < 30:
+@@ -252,63 +280,103 @@
+     if len(by_year) < 3:
+         problems.append(f"only {len(by_year)} year(s) with >= {MIN_PAIRS_FIT} matched pixels (need >= 3)")
+     if ci_rel > 0.2:
+-        problems.append(f"bootstrap 95% CI is {ci_rel:.0%} of k wide (need <= 20%)")
+-    if spread is not None and spread > 0.2:
+-        problems.append(f"k differs by {spread:.0%} between years (need <= 20%)")
+-    bad = [y for y, d in by_year.items()
+-           if d["k_from_other_years_pred_over_actual"] is not None
+-           and abs(d["k_from_other_years_pred_over_actual"] - 1) > 0.2]
++        problems.append(f"bootstrap 95% CI is {ci_rel:.1%} of k wide (need <= 20%)")
++    if het is not None:
++        if het["p_Q"] < 0.05:
++            problems.append(f"k differs between years by more than sampling error (Cochran Q p = {het['p_Q']:.3f})")
++        if het["tau_ci95"][1] > K_TAU_MAX:
++            problems.append(f"between-year variability of k cannot be bounded: tau = {het['tau']:.0%}, 95% upper "
++                            f"limit {het['tau_ci95'][1]:.0%} (need <= {K_TAU_MAX:.0%})")
++    z_crit = float(stats.norm.isf(0.025 / max(len(by_year), 1)))   # Bonferroni: one test per year at 5 % overall
++    bad = [y for y, d in by_year.items() if d.get("loyo_z") is not None and abs(d["loyo_z"]) > z_crit]
+     if bad:
+-        problems.append(f"k from the other years misses year(s) {bad} by more than 20%")
+-    grade = "HIGH" if not problems else ("LOW" if used_all_gaps or len(use) < K_TRUST_MIN_PAIRS else "MEDIUM")
+-    return {"k_trust": grade, "k_trust_problems": problems, "k_by_year": by_year,
+-            "k_year_spread": spread, "n_days_used": n_days, "k_ci_rel_width": ci_rel}
++        problems.append(f"k from the other years misses year(s) {bad} by more than sampling error "
++                        f"(|z| > {z_crit:.2f}, Bonferroni over {len(by_year)} years)")
++    grade = "HIGH" if not problems else ("LOW" if len(use) < K_TRUST_MIN_PAIRS else "MEDIUM")
++    return grade, problems, n_days, ci_rel
+ 
+ 
+-def fit_scale(pairs):
+-    """Constant aggregate scale k (VIIRS-equivalent FRP = k * MODIS FRP).
+-    Estimated over footprints where BOTH sensors detected fire, so it is not a detection probability."""
++def fit_scale(pairs, label=""):
++    """Constant aggregate scale k (VIIRS-equivalent FRP = k * MODIS FRP) for ONE MODIS satellite.
++    Estimated over footprints where BOTH sensors detected fire (conditional on a MODIS detection), so it is not a
++    detection probability and it ignores the many small fires only VIIRS sees.
++
++    Returns (k, info). k is None when the satellite has fewer than MIN_PAIRS_FIT matches within K_FIT_MAX_DT_MIN
++    minutes of S-NPP: overpasses further apart sample different fire states, so a ratio over all gaps is reported
++    only as `k_diagnostic_all_gaps` and is NOT a calibration."""
+     use_all = _usable(pairs)
+-    # Overpasses far apart see different fire states, so k uses only close-in-time matches.
+-    use = use_all[use_all["abs_dt_min"] <= K_FIT_MAX_DT_MIN]
+-    used_all_gaps = len(use) < MIN_PAIRS_FIT
+-    if used_all_gaps:  # not enough close matches: fall back, and say so (k_trust will be LOW)
+-        use = use_all
+-    cells = use.groupby("cell_id")[["frp", "viirs_frp_sum"]].sum()
+-    info = {"n_pairs": int(len(use)), "n_cells": int(len(cells)), "k": None,
+-            "n_pairs_any_time_gap": int(len(use_all)), "fit_max_dt_min": K_FIT_MAX_DT_MIN,
+-            "fit_used_all_time_gaps": bool(used_all_gaps)}
+-    if len(use) < MIN_PAIRS_FIT or len(cells) < 10:
+-        info["note"] = (f"only {len(use)} matched pixels in {len(cells)} cells; using identity (k=1). "
+-                        "Use a longer overlap period, ideally years when the orbits were close.")
+-        return None, info
+-    k = use["viirs_frp_sum"].sum() / use["frp"].sum()
+-    arr = cells.to_numpy()
++    close = use_all[use_all["abs_dt_min"] <= K_FIT_MAX_DT_MIN]
++    info = {"modis_satellite": label, "k": None, "k_trust": "NOT_VALIDATED", "k_trust_problems": [],
++            "n_pairs": int(len(close)), "n_pairs_any_time_gap": int(len(use_all)), "fit_max_dt_min": K_FIT_MAX_DT_MIN}
+     rng = np.random.default_rng(0)
+-    ks = np.empty(N_BOOT)
+-    for i in range(N_BOOT):  # resample whole cells: neighbouring pixels are not independent
+-        s = arr[rng.integers(0, len(arr), len(arr))]
+-        ks[i] = s[:, 1].sum() / s[:, 0].sum()
+-    lo, hi = np.percentile(ks, [2.5, 97.5])
++    cells_close = close.groupby("cell_id").ngroups if len(close) else 0
++    if len(close) < MIN_PAIRS_FIT or cells_close < MIN_CELLS_FIT:
++        info["k_trust_problems"] = [f"only {len(close)} matched pixels within {K_FIT_MAX_DT_MIN:g} min of VIIRS "
++                                    f"(need >= {MIN_PAIRS_FIT} in >= {MIN_CELLS_FIT} cells)"]
++        info["note"] = ("no close-in-time overpass pairs: k cannot be validated for this satellite and it receives "
++                        "NO VIIRS-equivalent FRP unless PYRO_APPLY_UNVALIDATED_K=1")
++        if len(use_all) >= MIN_PAIRS_FIT and use_all.groupby("cell_id").ngroups >= MIN_CELLS_FIT:
++            kd, lo, hi, _ = ratio_ci(_cluster_arr(use_all), rng, N_BOOT)
++            info["k_diagnostic_all_gaps"] = {
++                "k": kd, "k_ci95": [lo, hi], "n_pairs": int(len(use_all)),
++                "median_abs_dt_min": float(use_all["abs_dt_min"].median()),
++                "warning": "overpasses this far apart see different fire states (diurnal cycle): NOT a calibration"}
++        return None, info
++
++    use = close
++    arr = _cluster_arr(use)
++    k, lo, hi, se_log = ratio_ci(arr, rng, N_BOOT)
+     cut = int(len(use) * 0.7)  # chronological split, never random
+     tr, te = use.iloc[:cut], use.iloc[cut:]
+     k_tr = tr["viirs_frp_sum"].sum() / tr["frp"].sum()
++    date = use["acq_datetime_utc"].dt.floor("D")
++    day_cell = use.groupby([use["cell_id"], date])[["frp", "viirs_frp_sum"]].sum()
++    cells = use.groupby("cell_id")[["frp", "viirs_frp_sum"]].sum()
++    by_year = per_year_fits(use, rng)
++    het = None
++    if len(by_year) >= 3:
++        het = heterogeneity([np.log(d["k"]) for d in by_year.values()], [d["se_log_k"] for d in by_year.values()])
++    ks = [d["k"] for d in by_year.values()]
++    grade, problems, n_days, ci_rel = k_trust_grade(use, k, [lo, hi], by_year, het)
++    pi = prediction_interval(k, se_log, None if het is None else het["tau"], len(by_year))
++    sites = use[["latitude", "longitude"]].round(2).drop_duplicates()
+     info.update({
+-        "k": float(k), "k_ci95": [float(lo), float(hi)], "k_ci_includes_1": bool(lo <= 1.0 <= hi),
++        "k": float(k), "k_ci95": [lo, hi], "k_ci_includes_1": bool(lo <= 1.0 <= hi), "k_se_log": se_log,
++        "k_prediction_interval95_new_year": pi,
++        "n_cells": int(len(cells)), "n_sites_0p01deg": int(len(sites)),
+         "holdout": {
+             "n_test": int(len(te)),
+             "total_pred_over_actual_with_k": float(k_tr * te["frp"].sum() / te["viirs_frp_sum"].sum()),
+             "total_pred_over_actual_identity": float(te["frp"].sum() / te["viirs_frp_sum"].sum()),
+         },
+-        "pixel_corr_log": float(np.corrcoef(np.log(use["frp"]), np.log(use["viirs_frp_sum"]))[0, 1]),
+-        "cell_corr_log": float(np.corrcoef(np.log(cells["frp"]), np.log(cells["viirs_frp_sum"]))[0, 1]),
++        "pixel_corr_log": _log_corr(use["frp"], use["viirs_frp_sum"]),
++        # NOTE: cell_total_corr_log correlates per-cell TOTALS over the whole record (a spatial climatology, inflated
++        # by aggregation); cell_day_corr_log correlates cell x day totals, the fairer cell-level agreement.
++        "cell_total_corr_log": _log_corr(cells["frp"], cells["viirs_frp_sum"]),
++        "cell_corr_log": _log_corr(cells["frp"], cells["viirs_frp_sum"]),
++        "cell_day_corr_log": _log_corr(day_cell["frp"], day_cell["viirs_frp_sum"]),
+         "median_abs_dt_min": float(use["abs_dt_min"].median()),
+-        "matched_pixels_by_modis_satellite": use.groupby("source_satellite").size().to_dict(),
++        "k_trust": grade, "k_trust_problems": problems, "k_by_year": by_year,
++        "k_year_spread_max_minus_min_over_median": float((max(ks) - min(ks)) / np.median(ks)) if len(ks) >= 2 else None,
++        "k_year_heterogeneity": het, "n_days_used": n_days, "k_ci_rel_width": ci_rel,
++        "interpretation": _interpret(by_year, het, ks),
+     })
+-    info.update(k_trust(use, used_all_gaps, lo, hi, k))
+     return float(k), info
+ 
+ 
++def _interpret(by_year, het, ks):
++    if het is None or len(ks) < 2:
++        return "fewer than 3 years with enough matches: between-year stability cannot be assessed"
++    spread = (max(ks) - min(ks)) / np.median(ks)
++    se_med = float(np.median([d["se_log_k"] for d in by_year.values()]))
++    verdict = ("per-year k differ by more than their sampling error" if het["p_Q"] < 0.05
++               else "the year-to-year scatter is compatible with sampling error alone")
++    return (f"per-year k spans {spread:.0%} (max-min / median) but the median per-year standard error is "
++            f"{se_med:.0%}: {verdict} (Cochran Q p = {het['p_Q']:.2f}, I2 = {het['I2']:.0%}). Estimated between-year SD "
++            f"tau = {het['tau']:.0%} (95% interval {het['tau_ci95'][0]:.0%}-{het['tau_ci95'][1]:.0%}): the data cannot "
++            f"exclude a real year-to-year variation of that size, which is carried into k_prediction_interval95_new_year.")
++
++
+ def k_by_group(pairs, column):
+     """k recomputed inside each value of `column` (MODIS product version, day/night, ...), on the same
+     close-in-time pixels as the main fit. Groups with fewer than MIN_PAIRS_FIT pixels are left out."""
+@@ -323,10 +391,49 @@
+     return out
+ 
+ 
+-def apply_scale(df, k):
++def decide_scales(fits):
++    """Which satellites receive a VIIRS-equivalent FRP, and on what basis.
++    Default: only satellites whose k was fitted on close-in-time matches ('own'); every other satellite gets NaN.
++    PYRO_APPLY_UNVALIDATED_K=1: also apply a low-trust own fit ('own_low_trust') or, failing that, the k of the
++    best-validated satellite ('transferred:<sat>'), all labelled."""
++    scale, basis = {}, {}
++    for s, (k, info) in fits.items():
++        if k is not None:
++            scale[s] = {"k": k, "k_lo": info["k_prediction_interval95_new_year"][0],
++                        "k_hi": info["k_prediction_interval95_new_year"][1]}
++            basis[s] = "own"
++    donors = sorted(scale, key=lambda s: -fits[s][1]["n_pairs"])
++    for s, (k, info) in fits.items():
++        if s in scale:
++            continue
++        basis[s] = "none"
++        if not APPLY_UNVALIDATED_K:
++            continue
++        diag = info.get("k_diagnostic_all_gaps")
++        if diag is not None:
++            scale[s] = {"k": diag["k"], "k_lo": diag["k_ci95"][0], "k_hi": diag["k_ci95"][1]}
++            basis[s] = "own_low_trust"
++        elif donors:
++            d = scale[donors[0]]
++            scale[s] = dict(d)
++            basis[s] = f"transferred:{donors[0]}"
++    return scale, basis
++
++
++def apply_scale(df, scale, basis=None):
++    """Adds frp_equiv (+ lo/hi from the prediction interval of k) and scale_basis. NaN where the satellite has no
++    scale: a missing k is never replaced by 1 or by another satellite's k unless decide_scales allowed it."""
+     df = df.copy()
+-    is_viirs = (df["sensor_family"] == "VIIRS").all()
+-    df["frp_equiv"] = df["frp"] if (is_viirs or k is None) else df["frp"] * k
++    if (df["sensor_family"] == "VIIRS").all():
++        df["frp_equiv"] = df["frp"]
++        df["frp_equiv_lo"], df["frp_equiv_hi"] = df["frp"], df["frp"]
++        df["scale_basis"] = "reference"
++        return df
++    sat = df["source_satellite"]
++    df["frp_equiv"] = df["frp"] * sat.map({s: d["k"] for s, d in scale.items()}).astype(float)
++    df["frp_equiv_lo"] = df["frp"] * sat.map({s: d["k_lo"] for s, d in scale.items()}).astype(float)
++    df["frp_equiv_hi"] = df["frp"] * sat.map({s: d["k_hi"] for s, d in scale.items()}).astype(float)
++    df["scale_basis"] = sat.map(basis or {}).fillna("none")
+     return df
+ 
+ 
+@@ -337,83 +444,215 @@
+     return {d: (t0n <= d + tol) and (t1n >= d + pd.Timedelta(days=1) - tol) for d in dates}
+ 
+ 
+-def build_calendar(m, v, ref_sat, t0, t1):
+-    cells = (
+-        pd.concat([m, v])
+-        .groupby(["sensor_family", "source_satellite", "date", "cell_id", "cell_lat", "cell_lon"], as_index=False)
+-        .agg(detections=("frp", "size"), frp_mw=("frp", "sum"), frp_viirs_equiv_mw=("frp_equiv", "sum"))
+-    )
++def overpass_clusters(df, gap_min=None):
++    """Distinct overpass clusters per UTC day: consecutive detections more than `gap_min` minutes apart start a new
++    cluster. A polar orbiter crosses a region 2-4 times a day (day + night passes, neighbouring orbits), so a day with
++    ONE cluster has lost at least one pass."""
++    gap_min = COV_CLUSTER_GAP_MIN if gap_min is None else gap_min
++    if df.empty:
++        return pd.Series(dtype=float)
++    t = df["acq_datetime_utc"]
++    mins = ((t - t.dt.floor("D")).dt.total_seconds() / 60.0).to_numpy()
++    s = pd.DataFrame({"date": df["date"].to_numpy(), "m": mins}).sort_values(["date", "m"])
++    new = s.groupby("date")["m"].diff().fillna(np.inf) > gap_min
++    return new.groupby(s["date"]).sum().astype(float)
++
++
++def flag_low_coverage(det, clusters, min_frac=None, min_expected=None, extreme_frac=None):
++    """Partial-outage detector. det / clusters: Series indexed by day (det NaN where the sensor was not observed).
++    expected = local (+-15 d) median number of detections. A day is flagged when expected >= `min_expected` (a sparse
++    series cannot reveal an outage this way) AND either
++      (a) it has <= 1 overpass cluster and fewer than `min_frac` x expected detections (a pass is missing), or
++      (b) it has fewer than `extreme_frac` x expected detections (a level reached by < 1 % of days; real fire variability
++          does not remove 80 % of the detections of a region with persistent static sources).
++    A flagged day keeps its number but is labelled measured_low_coverage: it is a lower bound, not a measurement."""
++    min_frac = COV_MIN_FRAC if min_frac is None else min_frac
++    extreme_frac = COV_EXTREME_FRAC if extreme_frac is None else extreme_frac
++    min_expected = COV_MIN_EXPECTED if min_expected is None else min_expected
++    expected = det.rolling(31, center=True, min_periods=10).median()
++    low = (expected >= min_expected) & ((det < extreme_frac * expected) | ((clusters <= 1) & (det < min_frac * expected)))
++    return low.fillna(False).astype(bool), expected
++
++
++STATUS_MEASURED = ("measured", "measured_zero", "measured_low_coverage")
++
++
++def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None):
++    """Daily calendar + cell-day table.
++
++    observed : {"viirs": set-of-days | None, "<MODIS satellite>": set-of-days | None}; None / missing key = unknown,
++               treated as observed (and said so in frp_mapping.json).
++    Every sensor-level number is NaN on a day that sensor did not deliver data; `harmonized_status` is explicit."""
++    observed = observed or {}
++    scale_basis = scale_basis or {}
++    days = pd.date_range(t0.tz_localize(None).floor("D"), t1.tz_localize(None).floor("D"), freq="D")
++    cal = pd.DataFrame(index=days)
++    cal.index.name = "date"
+     vr = v[v["source_satellite"] == ref_sat]
+-    rows = []
+-    all_days = pd.date_range(t0.tz_localize(None).floor("D"), t1.tz_localize(None).floor("D"), freq="D")
+-    for d in all_days:
+-        md, vd = m[m["date"] == d], vr[vr["date"] == d]
+-        mc, vc = set(md["cell_id"]), set(vd["cell_id"])
+-        rows.append({
+-            "date": d.date(),
+-            "modis_detections": len(md), "modis_frp_mw": md["frp"].sum(),
+-            "modis_frp_viirs_equiv_mw": md["frp_equiv"].sum(), "modis_active_cells": len(mc),
+-            "viirs_detections": len(vd), "viirs_frp_mw": vd["frp"].sum(), "viirs_active_cells": len(vc),
+-            "viirs_i4_saturated_share": float(vd["i4_saturated"].mean()) if len(vd) else np.nan,
+-            "cells_active_in_both": len(mc & vc),
+-            "modis_cells_also_viirs": (len(mc & vc) / len(mc)) if mc else np.nan,
+-        })
+-    cal = pd.DataFrame(rows)
+-    cal["harmonized_frp_mw_viirs_equiv"] = np.where(
+-        cal["viirs_detections"] > 0, cal["viirs_frp_mw"], cal["modis_frp_viirs_equiv_mw"])
+-    cal["harmonized_source"] = np.select(
+-        [cal["viirs_detections"] > 0, cal["modis_detections"] > 0],
+-        [f"VIIRS {ref_sat}", "MODIS scaled"], default="no detections")
+-    flags = day_complete_flags(pd.to_datetime(cal["date"]), t0, t1)
+-    cal["day_complete"] = [flags[pd.Timestamp(d)] for d in cal["date"]]
+-    # A day missing from a raw file is MISSING, not "zero fire activity" (anomaly.py relies on this).
+-    obs_m, obs_v = observed_days("modis"), observed_days("viirs")
+-    cal["day_observed"] = [(obs_m is None or pd.Timestamp(d) in obs_m) and (obs_v is None or pd.Timestamp(d) in obs_v)
+-                           for d in cal["date"]]
++    mod_sats = sorted(m["source_satellite"].unique())
++
++    def obs_mask(key):
++        s = observed.get(key)
++        return np.ones(len(days), bool) if s is None else days.isin(list(s))
++
++    complete = np.array([f for f in day_complete_flags(days, t0, t1).values()])
++    v_obs = obs_mask("viirs")
++    sat_obs = {s: obs_mask(s) for s in mod_sats}
++    m_obs = np.logical_and.reduce(list(sat_obs.values())) if sat_obs else np.ones(len(days), bool)
++
++    def block(df, mask, name):
++        g = df.groupby("date")
++        out = pd.DataFrame({"det": g.size(), "frp": g["frp"].sum(), "cells": g["cell_id"].nunique()}).reindex(days)
++        out[["det", "frp", "cells"]] = out[["det", "frp", "cells"]].fillna(0.0)
++        out.loc[~mask, :] = np.nan
++        cal[f"{name}_detections"] = out["det"].astype("Int64")
++        cal[f"{name}_frp_mw"] = out["frp"]
++        return out
++
++    mb = block(m, m_obs, "modis")
++    cal["modis_active_cells"] = mb["cells"].astype("Int64")
++    for s in mod_sats:                       # Aqua and Terra are reported separately, never only as "MODIS"
++        block(m[m["source_satellite"] == s], sat_obs[s], slug(s))
++        cal[f"{slug(s)}_observed"] = sat_obs[s]
++    # VIIRS-equivalent MODIS FRP: only satellites that HAVE a scale; NaN (not 0) when none does
++    eq = m.dropna(subset=["frp_equiv"])
++    scaled = sorted(eq["source_satellite"].unique())
++    if scaled:
++        eq_obs = np.logical_and.reduce([sat_obs[s] for s in scaled])
++        g = eq.groupby("date")
++        for col, src in [("modis_frp_viirs_equiv_mw", "frp_equiv"), ("modis_frp_viirs_equiv_lo_mw", "frp_equiv_lo"),
++                         ("modis_frp_viirs_equiv_hi_mw", "frp_equiv_hi")]:
++            x = g[src].sum().reindex(days).fillna(0.0)
++            x[~eq_obs] = np.nan
++            cal[col] = x
++    else:
++        for col in ("modis_frp_viirs_equiv_mw", "modis_frp_viirs_equiv_lo_mw", "modis_frp_viirs_equiv_hi_mw"):
++            cal[col] = np.nan
++    cal["modis_frp_viirs_equiv_satellites"] = ",".join(scaled) if scaled else "none"
++
++    vb = block(vr, v_obs, "viirs")
++    cal["viirs_active_cells"] = vb["cells"].astype("Int64")
++    sat_share = vr.groupby("date")["i4_saturated"].mean().reindex(days) if len(vr) else pd.Series(np.nan, index=days)
++    sat_share[~v_obs] = np.nan
++    cal["viirs_i4_saturated_share"] = sat_share
++    clus = overpass_clusters(vr).reindex(days).fillna(0.0)
++    clus[~v_obs] = np.nan
++    cal["viirs_overpass_clusters"] = clus
++    low, expected = flag_low_coverage(vb["det"], clus)
++    cal["viirs_expected_detections"] = expected
++    cal["viirs_low_coverage"] = low.to_numpy()
++
++    mc = m[["date", "cell_id"]].drop_duplicates()
++    vc = vr[["date", "cell_id"]].drop_duplicates()
++    both = mc.merge(vc, on=["date", "cell_id"]).groupby("date").size().reindex(days).fillna(0.0)
++    both[~(v_obs & m_obs)] = np.nan
++    cal["cells_active_in_both"] = both.astype("Int64")
++    mac = mb["cells"]
++    cal["modis_cells_also_viirs"] = np.where(mac > 0, both / mac.where(mac > 0), np.nan)
++
++    # --- what each row IS: measured / zero / outage-suspect / not observed / partial day
++    det = cal["viirs_detections"].fillna(-1).to_numpy()
++    status = np.select(
++        [~complete, ~v_obs, cal["viirs_low_coverage"].to_numpy(), det == 0],
++        ["partial_day", "viirs_not_observed", "measured_low_coverage", "measured_zero"],
++        default="measured")
++    cal["day_complete"] = complete
++    cal["viirs_observed"] = v_obs
++    cal["modis_observed"] = m_obs
++    cal["day_observed"] = v_obs & m_obs          # legacy: both sensors present in their raw files
++    cal["harmonized_status"] = status
++    is_meas = np.isin(status, STATUS_MEASURED)
++    cal["harmonized_is_measured"] = is_meas
++    cal["harmonized_frp_mw_viirs_equiv"] = np.where(is_meas, cal["viirs_frp_mw"], np.nan)
++    cal["harmonized_source"] = np.where(is_meas, f"VIIRS {ref_sat}", "none")
++    eq_mw = cal["modis_frp_viirs_equiv_mw"].to_numpy()
++    cal["modis_only_evidence"] = (status == "viirs_not_observed") & (np.nan_to_num(eq_mw, nan=0.0) > 0)
+     cal["aoi"] = "global" if BBOX is None else ",".join(str(x) for x in BBOX)
+     if AOI_FILE is not None:
+         cal["aoi"] += f" | mask {AOI_FILE.name}"
+     if EXCLUDE_STATIC:
+         cal["aoi"] += " | non-static only (type 0)"
+-    return cal, cells
++
++    rows = pd.concat([m, v])
++    rows["has_eq"] = rows["frp_equiv"].notna()
++    rows["eq0"] = rows["frp_equiv"].fillna(0.0)
++    cells = rows.groupby(["sensor_family", "source_satellite", "date", "cell_id", "cell_lat", "cell_lon"], as_index=False).agg(
++        detections=("frp", "size"), frp_mw=("frp", "sum"), frp_viirs_equiv_mw=("eq0", "sum"), n_eq=("has_eq", "sum"))
++    cells.loc[cells["n_eq"] == 0, "frp_viirs_equiv_mw"] = np.nan   # no scale != zero FRP
++    cells = cells.drop(columns="n_eq")
++    cells["cell_area_km2"] = cell_area_km2(cells["cell_lat"], CELL_DEG)
++    cells["scale_basis"] = np.where(cells["sensor_family"] == "VIIRS", "reference",
++                                    cells["source_satellite"].map(scale_basis).fillna("none"))
++    return cal.reset_index(), cells
+ 
+ 
+ def sensitivity_summary(cal):
+-    """Detection-sensitivity ratios on COMPLETE days only (VIIRS 375 m sees many more, smaller fires)."""
++    """Detection-sensitivity ratios on days where both sensors were observed and complete (VIIRS 375 m sees many
++    more, smaller fires). ALL-MODIS basis (Terra + Aqua), kept for continuity; the like-for-like Aqua x S-NPP block
++    (same overpass time) is added by harmonize_validation.grid_sensitivity for the grid in use."""
+     full = cal[cal["day_complete"] & cal["day_observed"]]
+     if full.empty:
+-        return {"note": "no complete UTC day in the common window"}
++        return {"note": "no complete, observed UTC day in the common window"}
++    s = lambda c: float(full[c].astype(float).sum())
+     return {
++        "basis": "all MODIS satellites (Terra + Aqua) vs the VIIRS reference",
+         "complete_days_used": int(len(full)),
+-        "viirs_over_modis_detections": float(full["viirs_detections"].sum() / max(full["modis_detections"].sum(), 1)),
+-        "viirs_over_modis_active_cells": float(full["viirs_active_cells"].sum() / max(full["modis_active_cells"].sum(), 1)),
+-        "viirs_over_modis_scaled_total_frp": float(full["viirs_frp_mw"].sum() / max(full["modis_frp_viirs_equiv_mw"].sum(), 1e-9)),
+-        "share_of_modis_active_cells_also_viirs": float(full["cells_active_in_both"].sum() / max(full["modis_active_cells"].sum(), 1)),
++        "viirs_over_modis_detections": s("viirs_detections") / max(s("modis_detections"), 1),
++        "viirs_over_modis_active_cells": s("viirs_active_cells") / max(s("modis_active_cells"), 1),
++        "share_of_modis_active_cells_also_viirs": s("cells_active_in_both") / max(s("modis_active_cells"), 1),
+         "cell_deg": CELL_DEG,
+     }
+ 
+ 
++def daily_total_relationship(cal):
++    """Why MODIS cannot stand in for a missing VIIRS day: on days where VIIRS was measured, how well do the
++    k-scaled MODIS daily FRP totals reproduce the VIIRS totals?"""
++    if cal["modis_frp_viirs_equiv_mw"].notna().sum() == 0:
++        return {"note": "no MODIS satellite has a scale"}
++    d = cal[cal["harmonized_is_measured"] & cal["modis_frp_viirs_equiv_mw"].notna()]
++    if len(d) < 30:
++        return {"note": f"only {len(d)} usable days"}
++    x, y = d["modis_frp_viirs_equiv_mw"].to_numpy(float), d["viirs_frp_mw"].to_numpy(float)
++    nz = x > 0
++    r = float(np.corrcoef(np.log1p(x), np.log1p(y))[0, 1])
++    return {
++        "modis_satellites": cal["modis_frp_viirs_equiv_satellites"].iloc[0],
++        "n_days": int(len(d)), "share_days_modis_zero": float(1 - nz.mean()),
++        "corr_log1p": r, "r2_log1p": r * r,
++        "total_viirs_over_scaled_modis": float(y.sum() / max(x.sum(), 1e-9)),
++        "median_daily_viirs_over_scaled_modis_when_modis_detects": float(np.median(y[nz] / x[nz])) if nz.any() else None,
++        "conclusion": ("k aligns FRP inside co-detected footprints only; MODIS misses most of the small fires VIIRS "
++                       "375 m sees, so its scaled daily total is biased low and weakly predictive. A missing VIIRS day "
++                       "is therefore left missing (modis_only_evidence marks days where MODIS alone saw fire)."),
++    }
++
++
+ # --------------------------------------------------------------------------- plot
+-def plot_matchup(pairs, k, info):
++def plot_matchup(pairs, k, info, path):
+     import matplotlib
+     matplotlib.use("Agg")
+     import matplotlib.pyplot as plt
+-    use = _usable(pairs)
++    allp = _usable(pairs)
++    close = allp[allp["abs_dt_min"] <= K_FIT_MAX_DT_MIN]
+     fig, ax = plt.subplots(figsize=(6.5, 6))
+-    ax.scatter(use["frp"], use["viirs_frp_sum"], s=6, alpha=0.35)
+-    lim = np.array([max(use["frp"].min(), 0.1), use["frp"].max()])
++    far = allp.drop(close.index, errors="ignore")
++    if len(far):
++        ax.scatter(far["frp"], far["viirs_frp_sum"], s=4, alpha=0.15, color="#8a8a85", label=f"|dt| > {K_FIT_MAX_DT_MIN:g} min (not used)")
++    ax.scatter(close["frp"], close["viirs_frp_sum"], s=6, alpha=0.35, label=f"|dt| <= {K_FIT_MAX_DT_MIN:g} min (fit)")
++    lim = np.array([max(allp["frp"].min(), 0.1), allp["frp"].max()])
+     ax.plot(lim, lim, "k--", lw=1, label="identity (1:1)")
+     if k:
+         ax.plot(lim, k * lim, "r-", lw=2, label=f"VIIRS-equivalent = {k:.2f} x MODIS")
+     ax.set_xscale("log"); ax.set_yscale("log")
+-    ax.set_xlabel("MODIS pixel FRP (MW)")
++    ax.set_xlabel(f"MODIS {info.get('modis_satellite', '')} pixel FRP (MW)")
+     ax.set_ylabel("Sum of VIIRS 375 m FRP inside the MODIS footprint (MW)")
+     ax.set_title(f"{info['n_pairs']:,} matched pixels, median |dt| {info.get('median_abs_dt_min', float('nan')):.0f} min\n"
+                  f"pixel r(log)={info.get('pixel_corr_log', float('nan')):.2f}, "
+-                 f"0.5° cell r(log)={info.get('cell_corr_log', float('nan')):.2f}")
+-    ax.grid(True, alpha=0.3, which="both"); ax.legend()
++                 f"{CELL_DEG:g}° cell x day r(log)={info.get('cell_day_corr_log', float('nan')):.2f}")
++    ax.grid(True, alpha=0.3, which="both"); ax.legend(fontsize=8)
+     fig.tight_layout()
+-    fig.savefig(PROCESSED_DIR / "frp_matchup.png", dpi=150)
++    fig.savefig(path, dpi=150)
++    plt.close(fig)
+ 
+ 
+ # --------------------------------------------------------------------------- main
+@@ -448,49 +687,114 @@
+                 print(f"  {ms} x {vs}: no matches within {MATCH_MAX_MIN:.0f} min")
+     pairs = pd.concat(parts, ignore_index=True)
+ 
+-    # 2) FRP scale, estimated against the VIIRS satellite with the most matches
++    # 2) FRP scale: ONE k PER MODIS SATELLITE, each against the VIIRS satellite the calendar uses
+     ref_sat = pick_ref_sat(v)
+     matched_by_vs = pairs[pairs["n_viirs"] > 0].groupby("viirs_satellite").size()
+-    # fit k against the SAME VIIRS satellite the calendar uses, so k and the series agree
+     fit_vs = ref_sat if ref_sat in matched_by_vs.index else (matched_by_vs.idxmax() if len(matched_by_vs) else None)
+-    k, info = fit_scale(pairs[pairs["viirs_satellite"] == fit_vs] if fit_vs else pairs.iloc[0:0])
+-    info.update({
+-        "window_utc": [str(t0), str(t1)], "match_max_min": MATCH_MAX_MIN, "fit_viirs_satellite": fit_vs,
+-        "reference_viirs_satellite": ref_sat,
+-        "caveat": "Aggregate scale estimated on co-detected footprints with a non-zero time gap; "
+-                  "it is a statistical mapping, not a physical calibration.",
+-    })
+-    fit_pairs = pairs[pairs["viirs_satellite"] == fit_vs] if fit_vs else pairs.iloc[0:0]
+-    info["k_by_modis_version"] = k_by_group(fit_pairs, "version")
+-    info["k_by_daynight"] = k_by_group(fit_pairs, "daynight")
++    mod_sats = sorted(m["source_satellite"].unique())
++    fits = {}
++    for ms in mod_sats:
++        sub = pairs[(pairs["source_satellite"] == ms) & (pairs["viirs_satellite"] == fit_vs)] if fit_vs else pairs.iloc[0:0]
++        fits[ms] = fit_scale(sub, ms) if len(sub) else (None, {"modis_satellite": ms, "k": None, "k_trust": "NOT_VALIDATED",
++                                                               "k_trust_problems": ["no matches with VIIRS"], "n_pairs": 0})
++        k_s, info_s = fits[ms]
++        if k_s is None:
++            print(f"  k {ms}: NOT VALIDATED ({'; '.join(info_s['k_trust_problems'])})")
++        else:
++            print(f"  k {ms}: {k_s:.3f} (95% CI {info_s['k_ci95'][0]:.3f}-{info_s['k_ci95'][1]:.3f}, "
++                  f"new-year PI {info_s['k_prediction_interval95_new_year'][0]:.3f}-{info_s['k_prediction_interval95_new_year'][1]:.3f}, "
++                  f"trust {info_s['k_trust']}, {info_s['n_pairs']:,} pixels)")
++    scale, basis = decide_scales(fits)
++    for s in mod_sats:
++        if basis.get(s) == "none":
++            print(f"WARNING: MODIS {s} has no validated k: it gets NO VIIRS-equivalent FRP (NaN). "
++                  "Set PYRO_APPLY_UNVALIDATED_K=1 only if you accept an unverified assumption.")
++        elif basis.get(s, "").startswith(("transferred", "own_low")):
++            print(f"WARNING: MODIS {s} uses an UNVALIDATED scale ({basis[s]}); its values are labelled in scale_basis.")
+     versions = sorted(m["version"].astype(str).unique()) if "version" in m.columns else []
+-    info["modis_versions"] = versions
+     if len(versions) > 1:
+         print(f"WARNING: the MODIS files mix product versions {versions}; compare k_by_modis_version in "
+               "frp_mapping.json before treating the MODIS series as homogeneous.")
+-    if k is not None:
+-        thin = [s for s in m["source_satellite"].unique()
+-                if info["matched_pixels_by_modis_satellite"].get(s, 0) < MIN_PAIRS_FIT]
+-        if thin:
+-            info["scale_transferred_without_own_matches"] = thin
+-            print(f"WARNING: {thin} have < {MIN_PAIRS_FIT} matched pixels; k from the other MODIS satellite is "
+-                  "applied to them as an assumption (their overpass is too far from VIIRS to verify).")
+-        plot_matchup(pairs[pairs["viirs_satellite"] == fit_vs], k, info)
+-
+-    # 3) calendar on the reference (VIIRS-equivalent) scale
+-    # calendar reference satellite (ref_sat) was chosen above, before k was fitted
+-    m, v = apply_scale(m, k), apply_scale(v, k)
+-    cal, cells = build_calendar(m, v, ref_sat, t0, t1)
+-    info["detection_sensitivity"] = sensitivity_summary(cal)
+-    print("\nHarmonization summary:", json.dumps(info, indent=2))
+-    (PROCESSED_DIR / "frp_mapping.json").write_text(json.dumps(info, indent=2))
++    for s in mod_sats:
++        k_s, info_s = fits[s]
++        sub = pairs[(pairs["source_satellite"] == s) & (pairs["viirs_satellite"] == fit_vs)] if fit_vs else pairs.iloc[0:0]
++        info_s["k_by_modis_version"] = k_by_group(sub, "version") if k_s is not None else {}
++        info_s["k_by_daynight"] = k_by_group(sub, "daynight") if k_s is not None else {}
++        info_s["scale_basis"] = basis.get(s, "none")
++        if k_s is not None:
++            info_s["k_sensitivity"] = hv.k_sensitivity(_usable(sub), K_FIT_MAX_DT_MIN, MIN_PAIRS_FIT)
++            info_s["k_ci_by_cluster_unit"] = hv.cluster_unit_sensitivity(
++                _usable(sub)[lambda d: d["abs_dt_min"] <= K_FIT_MAX_DT_MIN], N_BOOT)
++
++    # 3) calendar. Observation status is inferred PER SATELLITE; a day absent from a raw file is not "zero fire".
++    m, v = apply_scale(m, scale, basis), apply_scale(v, scale, basis)
++    observed, obs_basis = {}, {}
++    observed["viirs"], obs_basis["viirs"] = observed_days("viirs", ref_sat)
++    for s in mod_sats:
++        observed[s], obs_basis[s] = observed_days("modis", s)
++    cal, cells = build_calendar(m, v, ref_sat, t0, t1, observed, basis)
++
++    primary = max(mod_sats, key=lambda s: fits[s][1].get("n_pairs", 0)) if mod_sats else None
++    info = {
++        "window_utc": [str(t0), str(t1)], "match_max_min": MATCH_MAX_MIN,
++        "reference_viirs_satellite": ref_sat, "fit_viirs_satellite": fit_vs,
++        "primary_modis_satellite": primary,
++        "k_by_modis_satellite": {s: fits[s][0] for s in mod_sats},      # fitted on close-in-time matches; null = not validated
++        "k_applied_to_calendar": {s: (scale[s]["k"] if s in scale else None) for s in mod_sats},
++        "scale_basis": basis,
++        "scale_policy": {
++            "rule": "a k is applied only to the satellite it was fitted on, from matches within "
++                    f"{K_FIT_MAX_DT_MIN:g} min of VIIRS; a satellite without such matches gets NaN",
++            "apply_unvalidated_k": APPLY_UNVALIDATED_K,
++            "satellites_without_scale": [s for s in mod_sats if s not in scale]},
++        "modis_satellites": {s: fits[s][1] for s in mod_sats},
++        "modis_versions": versions,
++        "observation_inference": {k_: (b if observed.get(k_) is not None else "unavailable (assumed observed)")
++                                  for k_, b in obs_basis.items()},
++        "harmonized_status_counts": {k_: int(c) for k_, c in cal["harmonized_status"].value_counts().items()},
++        "daily_total_relationship": daily_total_relationship(cal),
++        "detection_sensitivity": sensitivity_summary(cal),
++        "caveat": "k is an aggregate statistical mapping fitted on footprints where BOTH sensors detected fire, "
++                  "conditional on a MODIS detection; it is not a physical calibration, not a detection-probability "
++                  "correction, and it is specific to the MODIS satellite it was fitted on.",
++    }
++
++    # 4) spatial-aggregation diagnostics (what the 0.5 deg grid does and does not change)
++    if primary is not None and fits[primary][0] is not None:
++        sub = pairs[(pairs["source_satellite"] == primary) & (pairs["viirs_satellite"] == fit_vs)]
++        use_primary = _usable(sub)[lambda d: d["abs_dt_min"] <= K_FIT_MAX_DT_MIN]
++        okdays = cal.loc[cal["day_complete"] & cal["viirs_observed"] & cal[f"{slug(primary)}_observed"], "date"]
++        grid_df, grid_info = hv.grid_sensitivity(
++            m[m["source_satellite"] == primary], v[v["source_satellite"] == ref_sat], pd.DatetimeIndex(okdays),
++            use_primary, sorted(set(GRID_SENS_DEG) | {CELL_DEG}), CELL_DEG, N_BOOT, primary)
++        grid_df.to_csv(PROCESSED_DIR / "grid_sensitivity.csv", index=False)
++        info["grid_sensitivity"] = grid_info
++        info["detection_sensitivity"]["like_for_like"] = grid_info["at_calendar_grid"]
++        hv.plot_grid(grid_df, CELL_DEG, PROCESSED_DIR / "grid_sensitivity.png")
++        hv.plot_k_by_year(fits[primary][1], primary, PROCESSED_DIR / "k_by_year.png")
++        plot_matchup(sub, fits[primary][0], fits[primary][1], PROCESSED_DIR / "frp_matchup.png")
++
++    (PROCESSED_DIR / "frp_mapping.json").write_text(hv.dumps(info))
+     pairs.drop(columns=["date"], errors="ignore").to_csv(PROCESSED_DIR / "matched_pairs.csv", index=False)
+     cal.to_csv(PROCESSED_DIR / "calendar_daily.csv", index=False)
+     cells.to_csv(PROCESSED_DIR / "calendar_cells.csv", index=False)
+-    print(f"\nReference series: VIIRS {ref_sat}. Calendar (day_complete=False rows are partial days):")
+-    print(cal.drop(columns=["aoi"]).round(2).to_string(index=False))
+-    print("\nSaved matched_pairs.csv, calendar_daily.csv, calendar_cells.csv, frp_mapping.json in", PROCESSED_DIR)
++
++    print("\nScale per MODIS satellite:", json.dumps(info["k_by_modis_satellite"]), "| basis:", json.dumps(basis))
++    for s in mod_sats:
++        i_ = fits[s][1]
++        if i_.get("interpretation"):
++            print(f"  {s}: {i_['interpretation']}")
++        for p_ in i_.get("k_trust_problems", []):
++            print(f"  {s}: - {p_}")
++    print("Calendar rows by harmonized_status:", json.dumps(info["harmonized_status_counts"]))
++    print(f"\nReference series: VIIRS {ref_sat}. First / last rows of the calendar "
++          "(see harmonized_status; NaN = not observed, never zero):")
++    cols = ["date", "aqua_detections", "viirs_detections", "viirs_frp_mw", "viirs_overpass_clusters",
++            "harmonized_status", "harmonized_frp_mw_viirs_equiv", "modis_only_evidence"]
++    print(pd.concat([cal[cols].head(5), cal[cols].tail(5)]).round(2).to_string(index=False))
++    print("\nSaved matched_pairs.csv, calendar_daily.csv, calendar_cells.csv, frp_mapping.json, grid_sensitivity.csv, "
++          "grid_sensitivity.png, k_by_year.png, frp_matchup.png in", PROCESSED_DIR)
+ 
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()
+diff -ruN '--exclude=__pycache__' a/src/harmonize_validation.py b/src/harmonize_validation.py
+--- a/src/harmonize_validation.py	1970-01-01 00:00:00.000000000 +0000
++++ b/src/harmonize_validation.py	2026-11-08 16:32:53.230293256 +0000
+@@ -0,0 +1,276 @@
++"""Diagnostics for the MODIS -> VIIRS scale k and for the spatial aggregation grid (called by harmonize.py).
++
++ - k_sensitivity            : how k moves with the choices made to estimate it (time gap, day/night, source type,
++                              confidence, fire size, trimming, estimator). A constant k is a simplification; this
++                              table says how much it simplifies.
++ - cluster_unit_sensitivity : width of the bootstrap CI of k for different resampling units (pixel, cells of several
++                              sizes, site, day, month). Justifies the unit used for the headline CI.
++ - grid_sensitivity         : what the 0.5 deg aggregation grid changes and what it does not (point estimate of k and
++                              daily FRP totals: nothing; active-cell ratios, cell-level correlations, the CI: yes).
++ - plots and NaN-safe JSON helpers.
++
++Deliberately free of any import from harmonize.py (harmonize.py imports this module).
++"""
++import json
++
++import numpy as np
++import pandas as pd
++
++from src.kstats import cell_area_km2, cell_id, edge_split_probability, ratio_ci
++
++SMALL_CLUSTER_N = 30   # percentile bootstrap understates uncertainty with fewer clusters than this
++
++
++# --------------------------------------------------------------------------- json
++def sanitize(obj):
++    """Recursively turn numpy / pandas scalars into plain Python and NaN / inf into None (valid JSON)."""
++    if isinstance(obj, dict):
++        return {str(k): sanitize(v) for k, v in obj.items()}
++    if isinstance(obj, (list, tuple, set)):
++        return [sanitize(v) for v in obj]
++    if isinstance(obj, (np.bool_,)):
++        return bool(obj)
++    if isinstance(obj, (np.integer,)):
++        return int(obj)
++    if isinstance(obj, (float, np.floating)):
++        return None if not np.isfinite(obj) else float(obj)
++    if isinstance(obj, (pd.Timestamp, np.datetime64)):
++        return str(obj)
++    if obj is pd.NA:
++        return None
++    return obj
++
++
++def dumps(obj) -> str:
++    return json.dumps(sanitize(obj), indent=2)
++
++
++# --------------------------------------------------------------------------- k sensitivity
++def _k(g):
++    return float(g["viirs_frp_sum"].sum() / g["frp"].sum())
++
++
++def k_sensitivity(use_all, max_dt, min_pairs):
++    """k for every sensible alternative way of estimating it, from the usable matched pixels of ONE MODIS satellite
++    (`use_all`: any time gap within the matching window). The primary estimate is the ratio of sums over pixels within
++    `max_dt` minutes. Variants that change the ESTIMAND (median / geometric mean of pixel ratios describe a typical
++    pixel, not the total) are labelled as such. A variant with fewer than `min_pairs` pixels is reported without k."""
++    base = use_all[use_all["abs_dt_min"] <= max_dt]
++    k0 = _k(base)
++    out = {}
++
++    def add(name, g, estimand="total FRP (ratio of sums)"):
++        if len(g) < min_pairs:
++            out[name] = {"n_pairs": int(len(g)), "k": None, "rel_to_primary": None, "estimand": estimand,
++                         "note": f"fewer than {min_pairs} pixels"}
++            return
++        k = _k(g)
++        out[name] = {"n_pairs": int(len(g)), "k": k, "rel_to_primary": k / k0 - 1.0, "estimand": estimand}
++
++    add(f"primary (|dt| <= {max_dt:g} min)", base)
++    for dt in (10, 15, 60, 120):
++        add(f"|dt| <= {dt} min", use_all[use_all["abs_dt_min"] <= dt])
++    if "daynight" in base.columns:
++        add("daytime pixels only", base[base["daynight"].astype(str) == "D"])
++        add("night-time pixels only", base[base["daynight"].astype(str) == "N"])
++    if "type" in base.columns:
++        t = pd.to_numeric(base["type"], errors="coerce")
++        add("presumed vegetation fires only (FIRMS type 0)", base[t == 0])
++        add("static land sources only (type 2: flares, industry)", base[t == 2])
++    if "confidence_class" in base.columns:
++        add("MODIS high-confidence pixels only", base[base["confidence_class"] == "high"])
++    if "version" in base.columns:
++        for ver, g in base.groupby(base["version"].astype(str)):
++            add(f"MODIS product version {ver}", g)
++    med = base["frp"].median()
++    add("MODIS FRP below the median", base[base["frp"] <= med])
++    add("MODIS FRP above the median", base[base["frp"] > med])
++    add("drop the largest 1 % of MODIS pixels", base[base["frp"] <= base["frp"].quantile(0.99)])
++    add("drop the largest 5 % of MODIS pixels", base[base["frp"] <= base["frp"].quantile(0.95)])
++    ratio = (base["viirs_frp_sum"] / base["frp"]).to_numpy()
++    out["median of pixel ratios (typical pixel)"] = {
++        "n_pairs": int(len(base)), "k": float(np.median(ratio)), "rel_to_primary": float(np.median(ratio) / k0 - 1),
++        "estimand": "typical pixel (NOT total FRP): different quantity, shown for reference"}
++    out["geometric mean of pixel ratios"] = {
++        "n_pairs": int(len(base)), "k": float(np.exp(np.mean(np.log(ratio)))),
++        "rel_to_primary": float(np.exp(np.mean(np.log(ratio))) / k0 - 1),
++        "estimand": "typical pixel (NOT total FRP): different quantity, shown for reference"}
++    same = [d["rel_to_primary"] for d in out.values()
++            if d["rel_to_primary"] is not None and d["estimand"].startswith("total")]
++    return {"primary_k": k0, "max_abs_rel_deviation_same_estimand": float(max(abs(x) for x in same)) if same else None,
++            "variants": out,
++            "note": "k is an aggregate ratio conditional on a MODIS detection; it varies with fire size and "
++                    "time gap, so a single constant is an approximation whose size is read off this table."}
++
++
++# --------------------------------------------------------------------------- cluster units
++def cluster_unit_sensitivity(use, n_boot):
++    """Bootstrap CI of k when the resampling unit is a pixel, a cell of several sizes, a 0.01 deg site, a day or a month.
++    Too small a unit (pixel) ignores that neighbouring pixels of one fire move together; too large a unit leaves too
++    few clusters (< SMALL_CLUSTER_N) and the percentile bootstrap becomes unreliable (it under-covers)."""
++    rng = np.random.default_rng(1)
++    k0 = _k(use)
++    lat, lon = use["latitude"].to_numpy(), use["longitude"].to_numpy()
++    keys = {"pixel (no clustering)": np.arange(len(use))}
++    for d in (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0):
++        keys[f"{d:g} deg cell"] = cell_id(lat, lon, d)
++    keys["site (0.01 deg)"] = pd.factorize(pd.Series(np.round(lat, 2).astype(str)) + "_" + pd.Series(np.round(lon, 2).astype(str)))[0]
++    keys["day"] = use["acq_datetime_utc"].dt.strftime("%Y%m%d").astype(int).to_numpy()
++    keys["calendar month"] = use["acq_datetime_utc"].dt.strftime("%Y%m").astype(int).to_numpy()
++    rows = []
++    for name, key in keys.items():
++        arr = pd.DataFrame({"k": key, "f": use["frp"].to_numpy(), "v": use["viirs_frp_sum"].to_numpy()}).groupby("k")[["f", "v"]].sum().to_numpy()
++        _, lo, hi, se = ratio_ci(arr, rng, n_boot)
++        rows.append({"unit": name, "n_clusters": int(len(arr)), "k_ci95": [lo, hi], "rel_width": (hi - lo) / k0,
++                     "reliable": bool(len(arr) >= SMALL_CLUSTER_N)})
++    return rows
++
++
++# --------------------------------------------------------------------------- grid sensitivity
++def _corr(a, b):
++    a, b = np.asarray(a, float), np.asarray(b, float)
++    if len(a) < 3 or np.std(np.log(a)) == 0 or np.std(np.log(b)) == 0:
++        return float("nan")
++    return float(np.corrcoef(np.log(a), np.log(b))[0, 1])
++
++
++def grid_sensitivity(m_like, v_ref, valid_days, use, grids, primary_deg, n_boot, sat_label):
++    """Re-do every cell-level quantity of the pipeline on grids of several sizes.
++
++    m_like / v_ref : MODIS (the satellite whose k is used: like-for-like overpass with the VIIRS reference) and
++                     VIIRS-reference detections; valid_days: complete, observed UTC days; use: matched pixels in the
++                     k fit. NOT affected by the grid (by construction, checked here): k itself and every daily FRP
++                     total in the calendar. Affected: active-cell counts and overlap (modifiable areal unit problem),
++                     cell-level correlations, the clustered CI of k, and the 'same fire in two cells' error."""
++    days = set(pd.DatetimeIndex(valid_days).tolist())
++    m = m_like[m_like["date"].isin(days)]
++    v = v_ref[v_ref["date"].isin(days)]
++    rng = np.random.default_rng(2)
++    k0 = _k(use)
++    lat0 = float(np.nanmedian(np.r_[m["latitude"].to_numpy(), v["latitude"].to_numpy()])) if len(m) + len(v) else 0.0
++    date_u = use["acq_datetime_utc"].dt.strftime("%Y%m%d").astype(int)
++    rows = []
++    for g in sorted(set(grids)):
++        mc = pd.DataFrame({"date": m["date"].to_numpy(), "c": cell_id(m["latitude"], m["longitude"], g)}).drop_duplicates()
++        vc = pd.DataFrame({"date": v["date"].to_numpy(), "c": cell_id(v["latitude"], v["longitude"], g)}).drop_duplicates()
++        both = len(mc.merge(vc, on=["date", "c"]))
++        uc = cell_id(use["latitude"], use["longitude"], g)
++        frame = pd.DataFrame({"c": uc, "d": date_u.to_numpy(), "f": use["frp"].to_numpy(), "v": use["viirs_frp_sum"].to_numpy()})
++        tot = frame.groupby("c")[["f", "v"]].sum()
++        cd = frame.groupby(["c", "d"])[["f", "v"]].sum()
++        k_g, lo, hi, _ = ratio_ci(tot.to_numpy(), rng, n_boot)
++        rows.append({
++            "cell_deg": g, "cell_area_km2": float(cell_area_km2(lat0, g)),
++            "edge_split_probability_1km": edge_split_probability(1.0, g, lat0),
++            "modis_active_cell_days": int(len(mc)), "viirs_active_cell_days": int(len(vc)),
++            "viirs_over_modis_active_cells": len(vc) / max(len(mc), 1),
++            "share_of_modis_active_cells_also_viirs": both / max(len(mc), 1),
++            "viirs_detections_per_active_cell": len(v) / max(len(vc), 1),
++            "k_point_estimate": k_g, "k_ci95_low": lo, "k_ci95_high": hi, "k_ci_rel_width": (hi - lo) / k_g,
++            "n_cells_in_fit": int(len(tot)), "ci_reliable": bool(len(tot) >= SMALL_CLUSTER_N),
++            "cell_total_corr_log": _corr(tot["f"], tot["v"]), "cell_day_corr_log": _corr(cd["f"], cd["v"]),
++        })
++    df = pd.DataFrame(rows)
++    ref = df.loc[(df["cell_deg"] - primary_deg).abs().idxmin()]
++    n_days = len(days)
++    like = {
++        "modis_satellite": sat_label,
++        "basis": f"{sat_label} x VIIRS reference (same overpass time), days observed and complete",
++        "complete_days_used": int(n_days),
++        "viirs_over_modis_detections": float(len(v) / max(len(m), 1)),
++        "viirs_over_modis_scaled_total_frp": float(v["frp"].sum() / max(m["frp_equiv"].sum(), 1e-9)),
++        "viirs_over_modis_active_cells": float(ref["viirs_over_modis_active_cells"]),
++        "share_of_modis_active_cells_also_viirs": float(ref["share_of_modis_active_cells_also_viirs"]),
++        "cell_deg": float(primary_deg),
++    }
++    info = {
++        "grids_deg": [float(x) for x in df["cell_deg"]],
++        "k_point_estimate_identical_across_grids": bool(np.allclose(df["k_point_estimate"], k0, rtol=1e-9)),
++        "calendar_daily_frp_totals_depend_on_grid": False,
++        "at_calendar_grid": like,
++        "table": "grid_sensitivity.csv",
++        "median_latitude_of_detections": lat0,
++        "area_distortion": ("a lat/lon cell shrinks with cos(latitude): per-cell totals are comparable only between cells "
++                            "at similar latitudes; calendar_cells.csv carries cell_area_km2 for density normalisation. "
++                            "For a global run use an equal-area grid."),
++        "reading_guide": [
++            "k and daily FRP totals: identical for every grid (ratio of sums over pixels).",
++            "viirs_over_modis_active_cells and share_of_modis_active_cells_also_viirs: change with the grid (coarser cells "
++            "merge several fires into one 'active cell', so the ratio falls towards 1 and the overlap towards 100 %): "
++            "quote them together with cell_deg, never as grid-free properties of the sensors.",
++            "k_ci_rel_width: grows from pixel to ~0.25-0.5 deg cells (spatial dependence is captured) and collapses for "
++            "cells that leave fewer than 30 clusters (ci_reliable = False).",
++            "cell_total_corr_log (per-cell totals over the whole record) is inflated by aggregation; cell_day_corr_log is "
++            "the fairer cell-level agreement.",
++            "edge_split_probability_1km: chance that two detections 1 km apart (one fire seen by both sensors) land in "
++            "different cells; it is the matching error of the grid, small at 0.5 deg, large at 0.05 deg.",
++        ],
++    }
++    return df, info
++
++
++# --------------------------------------------------------------------------- plots
++def plot_grid(df, primary_deg, path):
++    import matplotlib
++    matplotlib.use("Agg")
++    import matplotlib.pyplot as plt
++    BLUE, ORANGE, GREY = "#2a78d6", "#eb6834", "#8a8a85"
++    fig, axes = plt.subplots(1, 3, figsize=(15, 4.4))
++    g = df["cell_deg"]
++    ax = axes[0]
++    ok = df["ci_reliable"]
++    ax.plot(g, df["k_ci_rel_width"], "o-", color=BLUE)
++    ax.scatter(g[~ok], df["k_ci_rel_width"][~ok], s=90, facecolors="none", edgecolors=ORANGE, label="< 30 clusters (unreliable)")
++    ax.set_title("Width of the 95% CI of k\n(cluster bootstrap, cells of this size)")
++    ax.set_ylabel("CI width / k")
++    if (~ok).any():
++        ax.legend(fontsize=8)
++    ax = axes[1]
++    ax.plot(g, df["viirs_over_modis_active_cells"], "o-", color=BLUE, label="VIIRS / MODIS active cells")
++    ax2 = ax.twinx()
++    ax2.plot(g, df["share_of_modis_active_cells_also_viirs"], "s--", color=ORANGE, label="share of MODIS cells also VIIRS")
++    ax2.set_ylim(0, 1.02)
++    ax.set_title("Cell metrics are properties of the grid")
++    ax.set_ylabel("ratio", color=BLUE); ax2.set_ylabel("share", color=ORANGE)
++    ax = axes[2]
++    ax.plot(g, df["cell_day_corr_log"], "o-", color=BLUE, label="cell x day")
++    ax.plot(g, df["cell_total_corr_log"], "s--", color=ORANGE, label="cell totals, whole record")
++    ax.plot(g, df["edge_split_probability_1km"], "^:", color=GREY, label="P(same fire split by cell edge)")
++    ax.set_title("Cell-level agreement and grid-edge error")
++    ax.legend(fontsize=8)
++    for a in axes:
++        a.set_xscale("log"); a.set_xlabel("cell size (degrees)"); a.grid(True, alpha=0.3)
++        a.axvline(primary_deg, color=GREY, lw=1, ls="--")
++    fig.tight_layout()
++    fig.savefig(path, dpi=150)
++    plt.close(fig)
++
++
++def plot_k_by_year(info, sat, path):
++    import matplotlib
++    matplotlib.use("Agg")
++    import matplotlib.pyplot as plt
++    by = info.get("k_by_year") or {}
++    if not by:
++        return
++    BLUE, ORANGE, GREY = "#2a78d6", "#eb6834", "#8a8a85"
++    yrs = list(by)
++    k = np.array([by[y]["k"] for y in yrs])
++    lo = np.array([by[y]["k_ci95"][0] for y in yrs])
++    hi = np.array([by[y]["k_ci95"][1] for y in yrs])
++    fig, ax = plt.subplots(figsize=(8, 5))
++    pi = info["k_prediction_interval95_new_year"]
++    ax.axhspan(pi[0], pi[1], color=ORANGE, alpha=0.12, label="95% prediction interval for an unseen year")
++    ax.axhspan(*info["k_ci95"], color=BLUE, alpha=0.18, label="95% CI of pooled k")
++    ax.axhline(info["k"], color=BLUE, lw=1.5)
++    ax.errorbar(range(len(yrs)), k, yerr=[k - lo, hi - k], fmt="o", color="#33322f", capsize=3, label="per-year k (95% CI)")
++    ax.set_xticks(range(len(yrs)), yrs)
++    het = info.get("k_year_heterogeneity")
++    sub = (f"Cochran Q p = {het['p_Q']:.2f}, I² = {het['I2']:.0%}, tau = {het['tau']:.0%} "
++           f"(95% upper limit {het['tau_ci95'][1]:.0%})") if het else "fewer than 3 years"
++    ax.set_title(f"MODIS {sat} x S-NPP: k by year\n{sub}")
++    ax.set_ylabel("k (VIIRS-equivalent FRP / MODIS FRP)")
++    ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
++    fig.tight_layout()
++    fig.savefig(path, dpi=150)
++    plt.close(fig)
+diff -ruN '--exclude=__pycache__' a/src/kstats.py b/src/kstats.py
+--- a/src/kstats.py	1970-01-01 00:00:00.000000000 +0000
++++ b/src/kstats.py	2026-11-08 04:57:21.036671342 +0000
+@@ -0,0 +1,172 @@
++"""Pure statistical helpers for the MODIS -> VIIRS scale k (no I/O, no pipeline state).
++
++Everything here is deterministic given its inputs (random numbers come from a generator the caller passes in), so
++it can be unit-tested against a known answer in `python -m src.selftest`.
++
++Contents
++ - cell_id / cell_area_km2 / edge_split_probability : the lat/lon aggregation grid and what it costs
++ - bootstrap_ratio                                  : cluster bootstrap of a ratio of sums (vectorised)
++ - heterogeneity                                    : random-effects view of per-year log k (Cochran Q, I^2, tau
++                                                      with a Q-profile interval, prediction interval for a new year)
++ - infer_missing_days                               : which UTC days are absent from a raw file (not "no fire")
++"""
++import numpy as np
++from scipy import optimize, stats
++
++R_KM = 6371.0088
++KM_PER_DEG = R_KM * np.pi / 180.0
++
++
++# --------------------------------------------------------------------------- grid
++def cell_id(lat, lon, deg: float) -> np.ndarray:
++    """Integer id of the `deg` x `deg` lat/lon cell containing each point (row-major: lat band * 1e6 + lon band)."""
++    ci = np.floor((np.asarray(lat, float) + 90.0) / deg).astype("int64")
++    cj = np.floor((np.asarray(lon, float) + 180.0) / deg).astype("int64")
++    return ci * 1_000_000 + cj
++
++
++def cell_area_km2(lat_centre, deg: float):
++    """Exact area (km^2) of a `deg` x `deg` lat/lon cell centred at `lat_centre`.
++    A = R^2 * d_lambda * (sin(phi_north) - sin(phi_south)); it shrinks with cos(latitude), so a lat/lon grid is NOT
++    equal-area: totals per cell are only comparable between cells at similar latitudes."""
++    lat = np.asarray(lat_centre, float)
++    s = np.sin(np.radians(np.clip(lat + deg / 2.0, -90.0, 90.0))) - np.sin(np.radians(np.clip(lat - deg / 2.0, -90.0, 90.0)))
++    return R_KM ** 2 * np.radians(deg) * s
++
++
++def edge_split_probability(distance_km: float, deg: float, lat: float) -> float:
++    """Probability that two detections `distance_km` apart (random orientation, random position) fall into DIFFERENT
++    cells of a `deg` grid at latitude `lat`: Buffon's needle on a square lattice, 4 d / (pi s) for d << s, with
++    s the geometric-mean cell side. It is the 'same fire, two cells' error of the grid."""
++    s = deg * KM_PER_DEG * np.sqrt(max(np.cos(np.radians(lat)), 1e-6))
++    return float(min(1.0, 4.0 * distance_km / (np.pi * s)))
++
++
++# --------------------------------------------------------------------------- bootstrap
++def bootstrap_ratio(arr, rng, n_boot: int, chunk: int = 250) -> np.ndarray:
++    """Cluster bootstrap of sum(numerator) / sum(denominator).
++
++    arr : (n_clusters, 2) array, column 0 = denominator sum per cluster, column 1 = numerator sum per cluster.
++    Whole clusters are resampled with replacement (neighbouring pixels of one fire are not independent).
++    Returns `n_boot` resampled ratios."""
++    arr = np.asarray(arr, float)
++    n = len(arr)
++    out = np.empty(n_boot)
++    for s in range(0, n_boot, chunk):
++        b = min(chunk, n_boot - s)
++        idx = rng.integers(0, n, size=(b, n))
++        out[s:s + b] = arr[idx, 1].sum(axis=1) / arr[idx, 0].sum(axis=1)
++    return out
++
++
++def ratio_ci(arr, rng, n_boot: int):
++    """(k, lo, hi, se_log) of a ratio of sums with a cluster-bootstrap 95 % percentile interval."""
++    arr = np.asarray(arr, float)
++    k = float(arr[:, 1].sum() / arr[:, 0].sum())
++    b = bootstrap_ratio(arr, rng, n_boot)
++    lo, hi = np.percentile(b, [2.5, 97.5])
++    return k, float(lo), float(hi), float(np.std(np.log(b), ddof=1))
++
++
++# --------------------------------------------------------------------------- between-year heterogeneity
++def _qgen(y, se, tau2):
++    w = 1.0 / (se ** 2 + tau2)
++    mu = float((w * y).sum() / w.sum())
++    return float((w * (y - mu) ** 2).sum()), mu, w
++
++
++def heterogeneity(y, se):
++    """Is the year-to-year scatter of a log-scale factor bigger than its sampling error?
++
++    y  : per-year log k.      se : per-year standard error of log k (e.g. cluster-bootstrap SD).
++    Returns None for fewer than 3 years, else a dict with
++      Q, df, p_Q       Cochran's Q and its chi-square p-value (H0: one common k, scatter = sampling error only)
++      I2               share of the scatter beyond sampling error (Higgins' I^2)
++      tau, tau_ci95    DerSimonian-Laird between-year SD of log k and its Q-profile 95 % interval
++                       (Viechtbauer 2007). tau = 0.10 means a typical year differs from the mean by ~10 %.
++      mu_random, se_mu_random   random-effects mean (log) and its SE
++    (prediction_interval() turns tau into the interval to carry into any value that uses k.)
++    The max-min spread of per-year k is NOT a valid stability test: it grows with the number of years and with
++    sampling noise, and is dominated by the smallest year."""
++    y, se = np.asarray(y, float), np.asarray(se, float)
++    n = len(y)
++    if n < 3 or not np.all(np.isfinite(y)) or not np.all(se > 0):
++        return None
++    df = n - 1
++    q0, mu_f, w = _qgen(y, se, 0.0)
++    c = w.sum() - (w ** 2).sum() / w.sum()
++    tau2 = max(0.0, (q0 - df) / c)
++
++    def solve(target):  # Q_gen(tau2) decreases in tau2; find where it hits the chi-square quantile
++        if q0 <= target:
++            return 0.0
++        hi = 1.0
++        while _qgen(y, se, hi)[0] > target and hi < 1e8:
++            hi *= 4.0
++        return float(optimize.brentq(lambda t: _qgen(y, se, t)[0] - target, 0.0, hi))
++
++    lo2 = solve(stats.chi2.ppf(0.975, df))
++    hi2 = solve(stats.chi2.ppf(0.025, df))
++    _, mu_r, w_r = _qgen(y, se, tau2)
++    se_mu = float(np.sqrt(1.0 / w_r.sum()))
++    return {
++        "n_years": int(n), "Q": float(q0), "df": int(df), "p_Q": float(stats.chi2.sf(q0, df)),
++        "I2": float(max(0.0, (q0 - df) / q0)) if q0 > 0 else 0.0,
++        "tau": float(np.sqrt(tau2)), "tau_ci95": [float(np.sqrt(lo2)), float(np.sqrt(hi2))],
++        "mu_random": mu_r, "se_mu_random": se_mu,
++    }
++
++
++def prediction_interval(k, se_log, tau, n_years):
++    """Approximate 95 % prediction interval for k in a year NOT in the sample (Higgins et al. 2009), centred on the
++    k that is actually applied: k * exp(+-t * sqrt(tau^2 + se_log^2)), t = Student-t quantile with n_years-2 df.
++    It combines the sampling error of the pooled k with the between-year SD, so it is wider than the plain
++    confidence interval exactly when k is not stable between years. With no between-year information
++    (tau = None) it degrades to the confidence-interval half-width."""
++    t = stats.t.ppf(0.975, max(int(n_years) - 2, 1)) if tau is not None else 1.96
++    half = float(t * np.sqrt((tau or 0.0) ** 2 + se_log ** 2))
++    return [float(k * np.exp(-half)), float(k * np.exp(half))]
++
++
++# --------------------------------------------------------------------------- missing days
++def infer_missing_days(counts, alpha: float = 1e-4, window: int = 30) -> np.ndarray:
++    """Which days of a daily raw-row-count series are MISSING (outage / not delivered) rather than 'no detections'?
++
++    counts : 1-D array of rows per day over every day of the file's span (0 where the day is absent).
++    Every maximal run of L empty days is judged against the days around it (+-`window`, run excluded): their mean mu
++    and variance give a negative-binomial model of a normal day, P0 = P(0 rows | normal day). The run is a gap if
++    P0**L < alpha, i.e. if that many empty days in a row is implausible *for that file at that time*.
++      - dense regional / global files (tens of detections per day): P0 ~ 0, so even ONE empty day is a gap;
++      - sparse files (a few detections per day): P0 is large, so only long runs are gaps;
++      - a file that is empty all around (P0 = 1) never reveals a gap.
++    This replaces a rule that used a Laplace-smoothed share of empty days and therefore treated a single empty
++    day of a dense file (e.g. 2024-09-26 of S-NPP over Egypt, ~90 rows on every normal day) as 'observed, zero fire'."""
++    cnt = np.asarray(counts, float)
++    missing = np.zeros(len(cnt), dtype=bool)
++    i = 0
++    while i < len(cnt):
++        if cnt[i] > 0:
++            i += 1
++            continue
++        j = i
++        while j + 1 < len(cnt) and cnt[j + 1] == 0:
++            j += 1
++        run = j - i + 1
++        around = np.r_[cnt[max(0, i - window):i], cnt[j + 1:j + 1 + window]]
++        if len(around) == 0:
++            gap = run >= 7
++        else:
++            mu = float(around.mean())
++            var = float(around.var(ddof=1)) if len(around) > 2 else mu
++            if mu <= 0:
++                p0 = 1.0
++            elif var <= mu * 1.0001:           # no over-dispersion: Poisson
++                p0 = float(np.exp(-mu))
++            else:                              # negative binomial with mean mu, variance var
++                r = mu * mu / (var - mu)
++                p0 = float((r / (r + mu)) ** r)
++            gap = bool(p0 ** run < alpha)
++        if gap:
++            missing[i:j + 1] = True
++        i = j + 1
++    return missing
+diff -ruN '--exclude=__pycache__' a/src/preprocess.py b/src/preprocess.py
+--- a/src/preprocess.py	2026-11-07 12:10:11.000000000 +0000
++++ b/src/preprocess.py	2026-11-08 04:55:54.839087263 +0000
+@@ -160,6 +160,7 @@
+     daily = []
+     seen = np.empty(0, dtype=np.uint64)  # sorted hashes of (satellite, lat, lon, UTC time) already written
+     raw_rows_per_day = {}  # UTC day -> raw rows in the file, before any AOI/date filter
++    raw_rows_by_sat = {}   # satellite name -> {UTC day -> raw rows}: an outage of ONE satellite must stay visible
+     t_min = t_max = None  # observation coverage of the raw files, before any AOI/date filter
+     for path in find_files(RAW_DIR, keyword):
+         print(f"{label}: reading {path.name}")
+@@ -179,6 +180,12 @@
+                 t_max = hi if t_max is None else max(t_max, hi)
+                 for day, cnt in raw_t.dropna().dt.strftime("%Y-%m-%d").value_counts().items():
+                     raw_rows_per_day[day] = raw_rows_per_day.get(day, 0) + int(cnt)
++                raw_sat = (chunk["satellite"].astype("string").str.strip().replace(SATELLITE_NAMES).fillna("unknown")
++                           if "satellite" in chunk.columns else pd.Series("unknown", index=chunk.index))
++                by_sat = pd.DataFrame({"day": raw_t.dt.strftime("%Y-%m-%d"), "sat": raw_sat.astype(str)}).dropna()
++                for (sat, day), cnt in by_sat.groupby(["sat", "day"]).size().items():
++                    d = raw_rows_by_sat.setdefault(str(sat), {})
++                    d[day] = d.get(day, 0) + int(cnt)
+ 
+             if len(std):
+                 # Drop detections already written from an earlier chunk or file
+@@ -213,7 +220,8 @@
+     if t_min is not None:
+         (PROCESSED_DIR / f"{label.lower()}_coverage.json").write_text(
+             json.dumps({"start_utc": str(t_min), "end_utc": str(t_max),
+-                        "raw_rows_per_day": dict(sorted(raw_rows_per_day.items()))}))
++                        "raw_rows_per_day": dict(sorted(raw_rows_per_day.items())),
++                        "raw_rows_per_day_by_satellite": {s: dict(sorted(d.items())) for s, d in sorted(raw_rows_by_sat.items())}}))
+     print(f"{label} raw rows: {n_raw:,} | kept: {n_kept:,} | "
+           f"duplicates removed across chunks/files: {n_dup:,}")
+     if first:
+diff -ruN '--exclude=__pycache__' a/src/selftest.py b/src/selftest.py
+--- a/src/selftest.py	2026-11-07 12:11:24.000000000 +0000
++++ b/src/selftest.py	2026-11-09 03:38:32.998556808 +0000
+@@ -1,12 +1,14 @@
+-"""Synthetic end-to-end check of matching, the FRP scale k and the anomaly/critical-window code,
+-all with a KNOWN answer. Nothing is read from or written to data/.
++"""Synthetic end-to-end check of matching, the FRP scale k, the observation-status logic, the grid diagnostics and the
++anomaly / validation code, all with a KNOWN answer. Nothing is read from or written to data/.
+ 
+ Run:  python -m src.selftest      (must finish with SELFTEST PASSED)
+ """
++import json
++
+ import numpy as np
+ import pandas as pd
+ 
+-from src import anomaly
++from src import anomaly, anomaly_validation, harmonize, harmonize_validation as hv, kstats
+ from src.harmonize import add_features, match_pair, fit_scale
+ 
+ TRUE_K = 1.6          # VIIRS-equivalent FRP = TRUE_K x MODIS FRP
+@@ -17,10 +19,12 @@
+ VIIRS_LEADS_MIN = 5.0  # S-NPP passes this many minutes before Aqua
+ 
+ 
+-def synthetic_overpasses(seed=1):
++def synthetic_overpasses(seed=1, year_k=None):
++    """Aqua pixels + the S-NPP pixels inside their footprints (+ VIIRS-only clutter). year_k: {year: true k}."""
+     rng = np.random.default_rng(seed)
+     mrows, vrows = [], []
+     for year in YEARS:
++        kk = TRUE_K if year_k is None else year_k[year]
+         days = rng.integers(0, 365, FIRES_PER_YEAR)
+         t0 = pd.Timestamp(f"{year}-01-01 13:30", tz="UTC") + pd.to_timedelta(
+             days * 1440 + rng.uniform(-8, 8, FIRES_PER_YEAR), unit="m")
+@@ -31,7 +35,7 @@
+             mrows.append(dict(sensor_family="MODIS", source_satellite="Aqua", latitude=lat[i],
+                               longitude=lon[i], acq_datetime_utc=t0[i], frp=frp_m[i], scan=1.2, track=1.1))
+             n = int(rng.integers(2, 7))
+-            share = rng.dirichlet(np.ones(n)) * frp_m[i] * TRUE_K * np.exp(rng.normal(0, NOISE))
++            share = rng.dirichlet(np.ones(n)) * frp_m[i] * kk * np.exp(rng.normal(0, NOISE))
+             for j in range(n):
+                 vrows.append(dict(
+                     sensor_family="VIIRS", source_satellite="S-NPP",
+@@ -49,6 +53,7 @@
+     return pd.DataFrame(mrows), pd.DataFrame(vrows), planted
+ 
+ 
++# --------------------------------------------------------------------------- A. scale k
+ def check_scale():
+     M, V, planted = synthetic_overpasses()
+     M, V = add_features(M), add_features(V)
+@@ -56,21 +61,210 @@
+     n_fires = len(YEARS) * FIRES_PER_YEAR
+     hit = int((pairs["n_viirs"] > 0).sum())
+     used = int(pairs["n_viirs"].sum())
+-    k, info = fit_scale(pairs)
++    k, info = fit_scale(pairs, "Aqua")
+     print(f"matched MODIS pixels {hit}/{n_fires}; VIIRS pixels assigned {used} (planted {planted})")
+     print(f"k = {k:.3f} (expected {EXPECTED_K:.3f}), CI {info['k_ci95'][0]:.3f}-{info['k_ci95'][1]:.3f}, "
+           f"trust {info['k_trust']}, years used {sorted(info['k_by_year'])}")
+     assert hit >= 0.95 * n_fires, "too few planted fires matched"
+     assert used == planted, "VIIRS pixel double counting or loss"
+     assert k is not None and abs(k / EXPECTED_K - 1) < 0.05, "k not recovered"
+-    assert info["k_trust"] == "HIGH", f"k should be trusted with 4 clean years: {info['k_trust_problems']}"
+-    assert not info["fit_used_all_time_gaps"], "close-in-time matches should have been enough"
++    assert (info["k_ci95"][1] - info["k_ci95"][0]) / k < 0.12, "CI implausibly wide for 1600 clean pixels"
++    lo, hi = info["k_prediction_interval95_new_year"]
++    assert lo < info["k_ci95"][0] and hi > info["k_ci95"][1], "prediction interval must be wider than the CI"
++    het = info["k_year_heterogeneity"]
++    assert het is not None and het["p_Q"] > 0.01, f"homogeneous years must not look heterogeneous: {het}"
++    assert info["k_trust"] == "HIGH", f"k should be trusted with 4 clean, homogeneous years: {info['k_trust_problems']}"
+ 
+     # one year only -> must NOT be graded HIGH (multi-year requirement)
+     one_year = pairs[pairs["acq_datetime_utc"].dt.year == YEARS[0]]
+-    _, info1 = fit_scale(one_year)
++    _, info1 = fit_scale(one_year, "Aqua")
+     assert info1["k_trust"] != "HIGH", "a single year must not give a HIGH-trust k"
+ 
++    # a satellite that passes 3 h before S-NPP must get NO k, however many pixels overlap within the matching window
++    Mt = M.copy()
++    Mt["source_satellite"] = "Terra"
++    Mt["acq_datetime_utc"] = Mt["acq_datetime_utc"] - pd.Timedelta(minutes=170)
++    Mt = add_features(Mt.drop(columns=["date", "lst_h", "area_km2", "cell_id", "cell_lat", "cell_lon"]))
++    pt = match_pair(Mt, V, 180)
++    kt, it = fit_scale(pt, "Terra")
++    print(f"Terra (170 min before S-NPP): k = {kt}, trust {it['k_trust']}, diagnostic ratio only: "
++          f"{it.get('k_diagnostic_all_gaps', {}).get('k')}")
++    assert kt is None and it["k_trust"] == "NOT_VALIDATED", "a satellite without close overpasses must not get a k"
++    assert it["k_diagnostic_all_gaps"]["k"] > 0, "the all-gap ratio is kept as a labelled diagnostic"
++
++    fits = {"Aqua": (k, info), "Terra": (kt, it)}
++    scale, basis = harmonize.decide_scales(fits)
++    assert "Terra" not in scale and basis["Terra"] == "none" and basis["Aqua"] == "own", "Terra must not inherit Aqua's k"
++    both = pd.concat([M, Mt], ignore_index=True)
++    eq = harmonize.apply_scale(both, scale, basis)
++    assert eq.loc[eq["source_satellite"] == "Terra", "frp_equiv"].isna().all(), "Terra FRP must stay NaN, not 1 x or Aqua's k"
++    assert np.allclose(eq.loc[eq["source_satellite"] == "Aqua", "frp_equiv"], eq.loc[eq["source_satellite"] == "Aqua", "frp"] * k)
++    harmonize.APPLY_UNVALIDATED_K = True            # the opt-in: still labelled, never silent
++    try:
++        scale2, basis2 = harmonize.decide_scales(fits)
++    finally:
++        harmonize.APPLY_UNVALIDATED_K = False
++    assert basis2["Terra"] == "own_low_trust" and "Terra" in scale2, "opt-in must apply AND label the unvalidated scale"
++    return pairs, M, V
++
++
++def check_heterogeneity():
++    """Between-year variation of the scale: invisible when absent, detected and sized when present."""
++    ky = {2015: 1.1, 2016: 1.9, 2017: 1.3, 2018: 2.0}      # true year effect of ~25 % SD
++    M, V, _ = synthetic_overpasses(seed=3, year_k=ky)
++    pairs = match_pair(add_features(M), add_features(V), 180)
++    k, info = fit_scale(pairs, "Aqua")
++    het = info["k_year_heterogeneity"]
++    print(f"heterogeneous years: Q p = {het['p_Q']:.2g}, tau = {het['tau']:.2f} (95% {het['tau_ci95'][0]:.2f}-{het['tau_ci95'][1]:.2f})")
++    assert het["p_Q"] < 0.01 and het["tau_ci95"][0] > 0, "real between-year variation must be detected"
++    assert info["k_trust"] != "HIGH" and any("differs between years" in p for p in info["k_trust_problems"])
++    assert info["k_prediction_interval95_new_year"][1] / info["k_prediction_interval95_new_year"][0] > \
++        info["k_ci95"][1] / info["k_ci95"][0] * 1.5, "the interval for an unseen year must reflect tau"
++    # the max-min spread alone must NOT decide: noisy years with a common k look 'unstable' by range only
++    rng = np.random.default_rng(0)
++    y = np.log(0.8) + rng.normal(0, 0.15, 10)
++    h = kstats.heterogeneity(y, np.full(10, 0.15))
++    spread = (np.exp(y).max() - np.exp(y).min()) / np.median(np.exp(y))
++    print(f"common k, SE 15% per year: max-min spread {spread:.0%} but Q p = {h['p_Q']:.2f}")
++    assert spread > 0.25 and h["p_Q"] > 0.05, "range is a bad stability statistic; Q must not flag sampling noise"
++
++
++def check_stats_helpers():
++    rng = np.random.default_rng(2)
++    arr = np.c_[np.full(60, 10.0), 10.0 * 0.8 * np.exp(rng.normal(0, 0.3, 60))]
++    k, lo, hi, se = kstats.ratio_ci(arr, rng, 4000)
++    assert lo < k < hi and abs(k - arr[:, 1].sum() / arr[:, 0].sum()) < 1e-12
++    # coverage of the cluster-bootstrap 95 % CI over independent replicates (a single dataset proves nothing)
++    truth = 0.8 * np.exp(0.3 ** 2 / 2)
++    cover = 0
++    for _ in range(150):
++        a = np.c_[np.full(60, 10.0), 10.0 * 0.8 * np.exp(rng.normal(0, 0.3, 60))]
++        _, l, h, _ = kstats.ratio_ci(a, rng, 600)
++        cover += l <= truth <= h
++    print(f"bootstrap CI coverage over 150 replicates: {cover / 150:.0%}")
++    assert cover / 150 >= 0.88, "95% bootstrap CI under-covers"
++    # the sphere is tiled exactly by the grid
++    lats = np.arange(-89.5, 90, 1.0)
++    assert abs((kstats.cell_area_km2(lats, 1.0) * 360).sum() / (4 * np.pi * kstats.R_KM ** 2) - 1) < 1e-9
++    assert kstats.cell_area_km2(60.0, 0.5) < 0.55 * kstats.cell_area_km2(0.0, 0.5), "cells must shrink with cos(lat)"
++    e = [kstats.edge_split_probability(1.0, d, 30.0) for d in (0.05, 0.25, 0.5, 2.0)]
++    assert all(a > b for a, b in zip(e, e[1:])) and e[2] < 0.04 < e[0], "edge error must fall with cell size"
++    # missing-day inference: dense file -> one empty day is a gap; sparse file -> only long runs; empty file -> never
++    r = np.random.default_rng(4)
++    dense = r.poisson(88, 400).astype(float)
++    dense[100] = 0
++    dense[200:208] = 0
++    assert set(np.flatnonzero(kstats.infer_missing_days(dense))) == {100, *range(200, 208)}, "dense gaps not found"
++    sparse = r.poisson(1.5, 1500).astype(float)
++    assert kstats.infer_missing_days(sparse).sum() <= 8, "sparse file: ordinary empty days must not be gaps"
++    sparse[500:520] = 0
++    assert kstats.infer_missing_days(sparse)[505], "a 20-day run in a sparse file is a gap"
++    nearly_empty = np.zeros(200)
++    nearly_empty[100] = 1.0
++    assert not kstats.infer_missing_days(nearly_empty).any(), "a file that is empty all around reveals no gap"
++    # NaN is never valid JSON
++    assert "NaN" not in hv.dumps({"a": float("nan"), "b": np.float64("inf"), "c": np.int64(3)})
++
++
++# --------------------------------------------------------------------------- B. calendar status
++def _calendar_case(n_viirs):
++    """12 days, VIIRS with `n_viirs` detections a day except on a gap day (not observed) and a zero day (observed, empty)."""
++    t0, t1 = pd.Timestamp("2016-03-01 00:00", tz="UTC"), pd.Timestamp("2016-03-12 23:59", tz="UTC")
++    rng = np.random.default_rng(5)
++    days = pd.date_range("2016-03-01", "2016-03-12", freq="D", tz="UTC")
++    gap_day, zero_day = pd.Timestamp("2016-03-05"), pd.Timestamp("2016-03-08")
++    rows = []
++    for d in days:
++        for _ in range(n_viirs):
++            rows.append(dict(sensor_family="VIIRS", source_satellite="S-NPP", latitude=30 + rng.uniform(0, 1),
++                             longitude=31 + rng.uniform(0, 1), frp=5.0, scan=0.4, track=0.4,
++                             acq_datetime_utc=d + pd.Timedelta(hours=float(rng.choice([1.5, 11, 12.5, 23])))))
++    v = pd.DataFrame(rows)
++    v = v[~v["acq_datetime_utc"].dt.floor("D").dt.tz_localize(None).isin([gap_day, zero_day])]
++    mrows = []                                  # Aqua: 2 detections every day (also on the VIIRS gap), Terra: 1 a day
++    for d in days:
++        for sat, n in (("Aqua", 2), ("Terra", 1)):
++            for _ in range(n):
++                mrows.append(dict(sensor_family="MODIS", source_satellite=sat, latitude=30 + rng.uniform(0, 1),
++                                  longitude=31 + rng.uniform(0, 1), frp=10.0, scan=1.2, track=1.1,
++                                  acq_datetime_utc=d + pd.Timedelta(hours=float(rng.choice([2.0, 12.0])))))
++    m, v = add_features(pd.DataFrame(mrows)), add_features(v)
++    v["i4_saturated"] = False
++    scale = {"Aqua": {"k": 0.8, "k_lo": 0.6, "k_hi": 1.0}}
++    basis = {"Aqua": "own", "Terra": "none"}
++    m, v = harmonize.apply_scale(m, scale, basis), harmonize.apply_scale(v, scale, basis)
++    all_days = pd.date_range("2016-03-01", "2016-03-12", freq="D")
++    observed = {"viirs": set(all_days) - {gap_day}, "Aqua": set(all_days), "Terra": set(all_days)}   # gap_day: NOT observed
++    cal, cells = harmonize.build_calendar(m, v, "S-NPP", t0, t1, observed, basis)
++    return cal.set_index("date"), cells, (m, v, t0, t1, observed, basis), gap_day, zero_day
++
++
++def check_calendar(M, V):
++    """A day with zero detections is not a day without observations; MODIS never fills a VIIRS gap."""
++    cal, cells, args, gap_day, zero_day = _calendar_case(n_viirs=3)          # sparse: an observed empty day is a real zero
++    g, z = cal.loc[gap_day], cal.loc[zero_day]
++    print(f"gap day -> {g['harmonized_status']}, observed empty day (sparse series) -> {z['harmonized_status']}")
++    assert g["harmonized_status"] == "viirs_not_observed" and np.isnan(g["harmonized_frp_mw_viirs_equiv"]), "gap must be NaN"
++    assert pd.isna(g["viirs_detections"]) and np.isnan(g["viirs_frp_mw"]), "sensor numbers on a gap day are unknown, not 0"
++    assert bool(g["modis_only_evidence"]) and g["modis_frp_viirs_equiv_mw"] > 0, "MODIS-only evidence flagged, never substituted"
++    assert g["harmonized_source"] == "none", "MODIS must not be the source of a harmonized value"
++    assert z["harmonized_status"] == "measured_zero" and z["harmonized_frp_mw_viirs_equiv"] == 0.0 and z["viirs_detections"] == 0, \
++        "an observed empty day is a measured zero (0.0), not a missing value"
++    ok = cal.loc[pd.Timestamp("2016-03-03")]
++    assert ok["harmonized_status"] == "measured" and ok["harmonized_frp_mw_viirs_equiv"] == ok["viirs_frp_mw"]
++    assert np.isclose(ok["modis_frp_viirs_equiv_mw"], 0.8 * ok["aqua_frp_mw"]), "equivalent uses Aqua only"
++    assert ok["terra_frp_mw"] > 0 and ok["modis_frp_viirs_equiv_satellites"] == "Aqua", "Terra reported, never scaled"
++    assert cells.loc[cells["source_satellite"] == "Terra", "frp_viirs_equiv_mw"].isna().all(), "Terra cells: NaN, not 0"
++    assert cells["cell_area_km2"].gt(0).all()
++    m, v, t0, t1, observed, basis = args
++    cal2, _ = harmonize.build_calendar(m, v, "S-NPP", pd.Timestamp("2016-03-01 12:00", tz="UTC"), t1, observed, basis)
++    assert cal2.set_index("date").loc[pd.Timestamp("2016-03-01"), "harmonized_status"] == "partial_day", "window edge"
++
++    dense, _, _, gap_day, zero_day = _calendar_case(n_viirs=40)              # dense: an empty day is an outage suspect
++    d = dense.loc[zero_day]
++    print(f"empty day in a dense series (40/day) -> {d['harmonized_status']}")
++    assert d["harmonized_status"] == "measured_low_coverage" and d["harmonized_is_measured"], "zero where 40 are normal"
++    assert dense.loc[gap_day, "harmonized_status"] == "viirs_not_observed"
++
++    # outage detector as a pure function
++    det = pd.Series(np.r_[np.full(40, 80.0), 6.0, np.full(40, 80.0), 30.0, np.full(30, 80.0)])
++    cl = pd.Series(np.r_[np.full(40, 3.0), 3.0, np.full(40, 3.0), 1.0, np.full(30, 3.0)])
++    low, _ = harmonize.flag_low_coverage(det, cl)
++    assert set(np.flatnonzero(low)) == {40, 81}, "80 -> 6 (any passes) and a one-pass 80 -> 30 day are outage-suspect"
++    sparse = pd.Series(np.r_[np.full(40, 2.0), 0.0, np.full(40, 2.0)])
++    assert not harmonize.flag_low_coverage(sparse, pd.Series(np.zeros(81)))[0].any(), "sparse series: no inference"
++
++
++# --------------------------------------------------------------------------- C. grid
++def check_grid(M, V):
++    pairs = match_pair(add_features(M), add_features(V), 180)
++    use = harmonize._usable(pairs)
++    use = use[use["abs_dt_min"] <= 30]
++    Md, Vd = add_features(M), add_features(V)
++    Md["frp_equiv"] = Md["frp"] * 1.6
++    days = pd.DatetimeIndex(sorted(set(Md["date"]) | set(Vd["date"])))
++    df, info = hv.grid_sensitivity(Md, Vd, days, use, [0.1, 0.5, 2.0], 0.5, 600, "Aqua")
++    print("grid sensitivity (synthetic):", df[["cell_deg", "viirs_over_modis_active_cells", "k_ci_rel_width", "edge_split_probability_1km"]].round(3).values.tolist())
++    assert info["k_point_estimate_identical_across_grids"], "k is a ratio of sums: it cannot depend on the grid"
++    assert df["viirs_over_modis_active_cells"].is_monotonic_decreasing, "coarser cells merge VIIRS cells faster than MODIS cells"
++    assert df["share_of_modis_active_cells_also_viirs"].is_monotonic_increasing
++    assert df["edge_split_probability_1km"].is_monotonic_decreasing
++    sens = hv.k_sensitivity(use, 30, 50)
++    assert abs(sens["primary_k"] / info["at_calendar_grid"]["viirs_over_modis_scaled_total_frp"] - 1) > 0   # runs, keys exist
++    assert sens["variants"] and "median of pixel ratios (typical pixel)" in sens["variants"]
++    units = hv.cluster_unit_sensitivity(use, 400)
++    assert {u["unit"] for u in units} >= {"pixel (no clustering)", "0.5 deg cell", "day"}
++    assert [u for u in units if u["unit"] == "4 deg cell"][0]["reliable"] is False or len(use) > 0
++
++
++# --------------------------------------------------------------------------- D. anomalies
++def _cal(idx, value, status=None):
++    doy = anomaly.doy365(idx.to_series())
++    cal = pd.DataFrame({"value": value, "valid": True, "doy": doy, "year": idx.year}, index=idx)
++    cal["value_measured"] = value
++    cal["status"] = "measured" if status is None else status
++    return cal
++
+ 
+ def check_anomalies():
+     rng = np.random.default_rng(7)
+@@ -80,7 +274,7 @@
+     value = seasonal * np.exp(rng.normal(0, 0.15, len(idx)))
+     spike = (idx >= "2017-06-01") & (idx <= "2017-06-07")      # off-peak burst, x8
+     value[spike] *= 8
+-    cal = pd.DataFrame({"value": value, "valid": True, "doy": doy, "year": idx.year}, index=idx)
++    cal = _cal(idx, value)
+     df = anomaly.score(cal)
+     events = anomaly.find_events(df)
+     hit = events[(pd.to_datetime(events["start"]) <= "2017-06-07") & (pd.to_datetime(events["end"]) >= "2017-06-01")]
+@@ -98,6 +292,51 @@
+     print("critical window(s):", windows[["start", "end", "peak"]].values.tolist())
+     assert inside, "critical window must contain the planted peak (day 200)"
+ 
++    # the validation: the planted burst must be ROBUST, the classical z must also see it, a seasonal control must exist
++    anomaly_validation.ANOM_REPLICATES, anomaly_validation.ANOM_NULL_SIMS = 4, 150
++    v = anomaly_validation.validate(cal, df, events)
++    ev = v["events"]
++    row = ev[(pd.to_datetime(ev["start"]) <= "2017-06-07") & (pd.to_datetime(ev["end"]) >= "2017-06-01")].iloc[0]
++    print(f"validation of the planted burst: {row['robustness']}, {row['variants_detected']}/{row['variants_testable']} variants")
++    assert row["robustness"] == "ROBUST" and bool(row["detected_by_classical_z"]), "a x8 burst must be robust"
++    assert row["null_p_family_t"] < 0.2 or row["null_p_family_gaussian"] < 0.05, "a x8 burst is not ordinary variability"
++    rep = v["report"]
++    assert rep["seasonality"]["max_abs_monthly_median_z"] < 0.3, "seasonal cycle not removed"
++    assert rep["seasonality"]["high_flags_in_peak_months"]["seasonal_baseline"] is not None
++    assert rep["missing_observations"]["scored_days_that_are_not_valid"] == 0
++    json.dumps(anomaly_validation._jsonable(rep))        # serialisable
++
++    # placebo: with NO planted event nothing may come out ROBUST
++    clean = _cal(idx, seasonal * np.exp(rng.normal(0, 0.15, len(idx))))
++    dfc = anomaly.score(clean)
++    vc = anomaly_validation.validate(clean, dfc, anomaly.find_events(dfc))
++    print(f"placebo (no planted event): {len(vc['events'])} episode(s), robustness {list(vc['events'].get('robustness', []))}")
++    assert not (vc["events"].get("robustness", pd.Series(dtype=str)) == "ROBUST").any(), "noise must not give a ROBUST episode"
++
++    # partial-outage days must not become 'low' anomalies: excluded when flagged, flagged when kept
++    outage = value.copy()
++    out_days = [pd.Timestamp(d) for d in ("2015-03-10", "2016-09-14", "2018-11-02")]
++    for d in out_days:
++        outage[idx.get_loc(d)] *= 0.04
++    status = pd.Series("measured", index=idx)
++    status.loc[out_days] = "measured_low_coverage"
++    both = _cal(idx, outage, status)
++    both["valid"] = both["status"].isin(("measured", "measured_zero"))
++    both["value"] = both["value_measured"].where(both["valid"])
++    kept = anomaly.score(both, valid=both["status"].isin(("measured", "measured_zero", "measured_low_coverage")).to_numpy())
++    dropped = anomaly.score(both)
++    assert (kept.loc[out_days, "flag"] == "low").all(), "an outage day left in the data is flagged 'low'"
++    assert dropped.loc[out_days, "z"].isna().all() and not (dropped["flag"] == "low").loc[out_days].any(), "excluded outage days stay unscored"
++    # a trend biases z by year (early years high, late years low) unless the annual level is removed
++    trend = value * np.exp(-0.12 * (idx.year - 2015.5))
++    ct = _cal(idx, trend)
++    bias = lambda d: float(d["z"].groupby(d["year"]).median().abs().max())
++    raw_b, adj_b = bias(anomaly.score(ct, level_adjust=False)), bias(anomaly.score(ct, level_adjust=True))
++    print(f"largest yearly median |z| under a -12 %/yr trend: {raw_b:.2f} without, {adj_b:.2f} with the annual level removed")
++    assert raw_b > 1.0 and adj_b < 0.7, "annual-level removal must cancel the trend-induced bias of z"
++    tr = anomaly_validation.annual_level_trend(anomaly.score(ct, level_adjust=False))
++    assert tr["p"] < 0.01 and tr["relative_change_per_year"] < -0.05, "the trend check must see a -12 %/yr decline"
++
+ 
+ def check_stub_season():
+     """A record that ends a few days into a new season must not crash season_by_year (it did on real data)."""
+@@ -105,7 +344,7 @@
+     idx = pd.date_range("2012-01-01", "2019-12-31", freq="D")
+     doy = anomaly.doy365(idx.to_series())
+     value = (200 * np.exp(-0.5 * ((doy - 200) / 35.0) ** 2) + 5) * np.exp(rng.normal(0, 0.15, len(idx)))
+-    cal = pd.DataFrame({"value": value, "valid": True, "doy": doy, "year": idx.year}, index=idx)
++    cal = _cal(idx, value)
+     df = anomaly.score(cal)
+     _, start = anomaly.critical_windows(anomaly.climatology(df))
+     cut = pd.Timestamp("2019-01-01") + pd.Timedelta(days=start - 1 + 3)   # 4 days into the last season
+@@ -116,7 +355,11 @@
+ 
+ 
+ def main():
+-    check_scale()
++    check_stats_helpers()
++    pairs, M, V = check_scale()
++    check_heterogeneity()
++    check_calendar(M, V)
++    check_grid(M, V)
+     check_anomalies()
+     check_stub_season()
+     print("SELFTEST PASSED")
+--- a/README.md	2026-11-07 12:11:42.000000000 +0000
++++ b/README.md	2026-11-09 03:43:57.542921950 +0000
+@@ -6,9 +6,11 @@
+ 
+ **Phase A (this starter):** MODIS Collection 6.1 active-fire CSVs and VIIRS 375 m active-fire CSVs (S-NPP, NOAA-20 and/or NOAA-21). This phase validates data ingestion, cleaning and exploratory analysis. It is *not* the final MODIS-continuity harmonization experiment.
+ 
+-**Phase B (implemented, `src/harmonize.py`):** footprint-aware matching of MODIS and VIIRS 375 m detections, an aggregate FRP scale `k` (bootstrap CI, per-year stability, trust grade) and a unified burning-activity calendar on a VIIRS-equivalent scale. It needs years of data to be trusted (see `k_trust` in `frp_mapping.json`). Optionally also obtain the VIIRS 750 m product (`VNP14`, `VJ114`), which NASA describes as designed for continuity with MODIS. Do not label the 375 m CSV as 750 m.
++**Phase B (implemented, `src/harmonize.py`):** footprint-aware matching of MODIS and VIIRS 375 m detections, an aggregate FRP scale `k` **per MODIS satellite** (bootstrap CI, between-year heterogeneity analysis, prediction interval, trust grade) and a unified burning-activity calendar on the VIIRS reference scale with explicit observation status. It needs years of data to be trusted (see `k_trust` in `frp_mapping.json`). Optionally also obtain the VIIRS 750 m product (`VNP14`, `VJ114`), which NASA describes as designed for continuity with MODIS. Do not label the 375 m CSV as 750 m.
+ 
+-**Phase C (implemented, `src/anomaly.py`):** anomaly detection against a leave-one-year-out seasonal baseline, anomalous episodes and critical burning windows. It needs multi-year history (>= 5 valid years recommended).
++**Phase C (implemented, `src/anomaly.py`, `src/anomaly_validation.py`):** anomaly detection against a leave-one-year-out seasonal baseline, anomalous episodes with a statistical validation of each one, and critical burning windows. It needs multi-year history (>= 5 valid years recommended).
++
++Methodology, the evidence behind each design decision and the known limits are in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
+ 
+ ## 1. Download data
+ 
+@@ -78,13 +80,17 @@
+ python -m src.harmonize
+ ```
+ 
+-Clamps both sensors to their common time window, assigns each VIIRS 375 m pixel to one MODIS footprint, estimates an aggregate FRP scale `k` (VIIRS-equivalent FRP = `k` x MODIS FRP) with a cell-clustered bootstrap interval and a chronological hold-out, and writes a calendar on a VIIRS-equivalent scale. Optional variables: `PYRO_CELL_DEG` (default 0.5), `PYRO_MATCH_MIN` (default 180 minutes), `PYRO_MIN_PAIRS` (default 50), `PYRO_DAY_TOL_MIN` (default 30).
++Clamps both sensors to their common time window, assigns each VIIRS 375 m pixel to one MODIS footprint, estimates an aggregate FRP scale `k` (VIIRS-equivalent FRP = `k` x MODIS FRP) **separately for each MODIS satellite**, and writes a calendar on the VIIRS reference scale. Optional variables: `PYRO_CELL_DEG` (default 0.5), `PYRO_MATCH_MIN` (default 180 minutes), `PYRO_MIN_PAIRS` (default 50), `PYRO_DAY_TOL_MIN` (default 30), `PYRO_N_BOOT` (default 10000 bootstrap replicates), `PYRO_GRID_SENS` (grid sizes of the sensitivity sweep, default `0.05,0.1,0.25,0.5,1,2`).
+ 
+-Outputs in `data/processed/`: `calendar_daily.csv` (check `day_complete`), `calendar_cells.csv` (cell-day table; filter it to any area of interest), `matched_pairs.csv`, `frp_mapping.json`, `frp_matchup.png`.
++Outputs in `data/processed/`: `calendar_daily.csv`, `calendar_cells.csv` (cell-day table with `cell_area_km2`; filter it to any area of interest), `matched_pairs.csv`, `frp_mapping.json`, `frp_matchup.png`, `k_by_year.png`, `grid_sensitivity.csv`, `grid_sensitivity.png`.
+ 
+-Limits: 24h NRT files only demonstrate the pipeline. A usable calendar needs years of archive data.
++**The scale k, per satellite.** `frp_mapping.json` holds one entry per MODIS satellite under `modis_satellites`, with `k`, its CI, `k_prediction_interval95_new_year`, `k_by_year`, `k_year_heterogeneity` (Cochran Q, I2, between-year SD tau), `k_sensitivity` (how k moves with time gap, day/night, source type, fire size, trimming), `k_ci_by_cluster_unit`, `k_trust` (HIGH / MEDIUM / LOW / NOT_VALIDATED) and `k_trust_problems` (exactly what is missing). `k` is fitted only on matched pixels within `PYRO_K_MAX_DT_MIN` minutes (default 30). A satellite with fewer than `PYRO_MIN_PAIRS` such pixels (Terra against S-NPP: ~150 minutes apart) gets **no k and no VIIRS-equivalent FRP** (`NaN`); its k is never borrowed from another satellite unless you set `PYRO_APPLY_UNVALIDATED_K=1`, and then every value is labelled in `scale_basis`. HIGH needs >= 500 pixels (`PYRO_K_TRUST_PAIRS`), >= 30 days, >= 3 years with enough matches, a bootstrap CI <= 20 % wide, no significant between-year heterogeneity and a 95 % upper limit of tau <= `PYRO_K_TAU_MAX` (default 0.15), and a leave-one-year-out check within sampling error. The max-min spread of per-year k is reported but is not a stability test (it is dominated by sampling noise).
+ 
+-`frp_mapping.json` now reports `k_trust` (HIGH / MEDIUM / LOW) and `k_trust_problems` (exactly what is missing). `k` is fitted only on matched pixels within `PYRO_K_MAX_DT_MIN` minutes (default 30), which automatically selects the years when the satellites' overpasses were close. HIGH needs >= 500 such pixels (`PYRO_K_TRUST_PAIRS`), >= 30 days, >= 3 years with enough matches, a bootstrap CI <= 20 % wide, year-to-year spread <= 20 % and a leave-one-year-out check within 20 % (`k_by_year`). The calendar uses ONE VIIRS reference satellite for the whole period (`PYRO_REF_SAT`, default: the one observed on most days); `day_observed=False` marks days that are absent from the raw files (for global files any empty day; for sparse regional files only runs of empty days too long to be plausible).
++**Observation status in the calendar.** A day with no detections is not a day without observations. Every sensor-level number is `NaN` on a day that sensor did not deliver data. `harmonized_status` is one of `measured`, `measured_zero`, `measured_low_coverage` (a day that lost overpasses: a lower bound), `viirs_not_observed` and `partial_day`; `harmonized_frp_mw_viirs_equiv` is the VIIRS reference value on the first three and `NaN` otherwise, and `harmonized_source` is never MODIS. MODIS is not substituted for a missing VIIRS day (on this data VIIRS totals are ~9x the k-scaled Aqua totals and correlate weakly with them; `daily_total_relationship`). Days with no VIIRS data but Aqua detections are marked `modis_only_evidence`. Per-source flags: `viirs_observed`, `aqua_observed`, `terra_observed`, `modis_observed` (`day_observed` = VIIRS and MODIS both present). `*_observed` is inferred from row counts per satellite (a day is missing when an empty day is implausible for that file; one empty day is a gap in a dense file, only long runs in a sparse one). Outage-suspect days are controlled by `PYRO_COV_MIN_FRAC` (0.5), `PYRO_COV_EXTREME_FRAC` (0.2), `PYRO_COV_MIN_EXPECTED` (20). The calendar uses ONE VIIRS reference satellite for the whole period (`PYRO_REF_SAT`, default: the one observed on most days). `modis_frp_viirs_equiv_mw` (+ `_lo_mw` / `_hi_mw` from the prediction interval of k) covers only satellites that have a k.
++
++**Spatial grid.** Matching, k and every daily FRP total use native pixels and do not depend on the 0.5 degree grid; the grid is used for the bootstrap clusters, the active-cell counts, the cell-level correlations and `calendar_cells.csv`. `grid_sensitivity.csv` re-computes those quantities for several cell sizes; see `docs/METHODOLOGY.md`, section 4, for why 0.5 degrees, what it loses, and how to read the cell metrics (they are properties of the grid; quote them with `cell_deg`).
++
++Limits: 24h NRT files only demonstrate the pipeline. A usable calendar needs years of archive data.
+ 
+ ## 7. Multi-year archive
+ 
+@@ -98,7 +104,7 @@
+ 
+    Default sources are `MODIS_SP` (Terra + Aqua) and `VIIRS_SNPP_SP`. VIIRS S-NPP 375 m starts 2012-01-20, NOAA-20 2018-04-01, NOAA-21 2023-03-01. `_SP` lags real time by about 5 months (use `_NRT` sources for the latest months). Without `--bbox` the request is global: tens of millions of VIIRS rows per year, so start with a region. Alternatively request files from the FIRMS archive page (https://firms.modaps.eosdis.nasa.gov/download/; delivered by e-mail) and save them in `data/raw/` with `modis` or `viirs` in the name.
+ 3. Run the pipeline with the same `PYRO_BBOX` for every step: `preprocess`, `plot_overview`, `harmonize`, `anomaly`.
+-4. For a trustworthy `k`, include years when Aqua and S-NPP crossed the same place within minutes (S-NPP and Aqua both ~13:30 until Aqua's orbit was allowed to drift in the early 2020s; check the printed local solar times). Check `k_trust` in `frp_mapping.json`.
++4. For a trustworthy `k`, include years when Aqua and S-NPP crossed the same place within minutes (S-NPP and Aqua both ~13:30 until Aqua's orbit was allowed to drift in the early 2020s; check the printed local solar times). Check `k_trust` of each satellite under `modis_satellites` in `frp_mapping.json`.
+ 5. Memory: `harmonize` keeps both standardized files in memory and stops with a message above `PYRO_MAX_ROWS` (15 million rows per file). For the whole planet, run region by region or year by year.
+ 
+ ## 8. Anomalies and critical burning windows
+@@ -108,7 +114,11 @@
+ python -m src.anomaly
+ ```
+ 
+-Needs `calendar_daily.csv` from `harmonize` covering several years (>= 2 to run, `PYRO_ANOM_MIN_YEARS`, default 5, to be flagged reliable). Each day is compared with the same season (+- `PYRO_ANOM_WINDOW` days, default 7) in all OTHER years (median / MAD of log1p FRP, robust z). Outputs in `data/processed/`: `anomalies_daily.csv`, `anomaly_events.csv` (episodes: >= 3 elevated days, peak z >= `PYRO_ANOM_Z`, default 3), `critical_windows.csv` (days at/above the `PYRO_CRIT_PCT` percentile, default 75, of the multi-year median, with their share of annual FRP), `season_by_year.csv` (10 % / peak / 90 % of FRP per season), `anomaly_report.json` and `anomaly_overview.png`. Partial and absent days are missing, never zero. 'low' flags can be outages rather than less fire.
++Needs `calendar_daily.csv` from `harmonize` covering several years (>= 2 to run, `PYRO_ANOM_MIN_YEARS`, default 5, to be flagged reliable). The analysed series is the VIIRS reference value on days with `harmonized_status` `measured` or `measured_zero`; absent, partial and outage-suspect days are missing, never zero (`PYRO_ANOM_INCLUDE_LOW_COVERAGE=1` keeps the outage-suspect days). Each day is compared with the same season (+- `PYRO_ANOM_WINDOW` days, default 7) in all OTHER years (median / MAD of log1p FRP, robust z). `PYRO_ANOM_DETREND=1` removes each year's median level first (the series has a significant trend on the shipped data; see `anomaly_validation.json`).
++
++Outputs in `data/processed/`: `anomalies_daily.csv` (with `status`), `anomaly_events.csv` (episodes: >= 3 elevated days, peak z >= `PYRO_ANOM_Z`, default 3, plus the validation columns below), `critical_windows.csv` (days at/above the `PYRO_CRIT_PCT` percentile, default 75, of the multi-year median, with their share of annual FRP), `season_by_year.csv` (10 % / peak / 90 % of FRP per season), `anomaly_report.json`, `anomaly_overview.png`.
++
++**Validation (on by default, ~25 s; `PYRO_ANOM_VALIDATE=0` skips it).** A z-score above 3 does not prove that an event is exceptional, so every episode is re-tested: other baseline windows, an IQR instead of the MAD, earlier / later halves of the years, neighbouring years skipped, a causal past-only baseline, the annual level removed, random data loss (`PYRO_ANOM_REPLICATES`, default 30), the classical mean/SD z-score, and a Monte-Carlo null (`PYRO_ANOM_NULL_SIMS`, default 2000) estimated from the non-event days. It also checks residual seasonality, extreme-value distortion of the baseline, low flags next to gaps and on outage-suspect days, and the annual-level trend. `anomaly_events.csv` gains `robustness` (ROBUST / MODERATE / FRAGILE), `variants_detected` / `variants_testable`, `thinning_detection_rate`, `detected_by_classical_z`, `peak_pool_percentile`, `null_p_family_t` / `null_p_family_gaussian` and a text `assessment`. Full results: `anomaly_validation.json`, `anomaly_variants.csv`, `anomaly_event_variants.csv`, `anomaly_validation.png`. `robustness` is a statement about the statistics, not proof that fire activity was exceptional. 'low' flags can still be outages rather than less fire.
+ 
+ ## Important scientific notes
+ 
+@@ -121,3 +131,7 @@
+ - FRP is in MW in the FIRMS tables, but always inspect the product metadata.
+ - A nearby MODIS and VIIRS detection is only a *candidate match*, not proof that both sensors saw the same fire. Overpass times differ, as do pixel footprints, view geometry and sensitivity. Do not assume the nominal 10:30 / 13:30 schedules: in the 2015-2025 standard-processing files for Egypt supplied with this project the median local solar time of daytime detections is about 10.7 h (Terra), 13.3 h (Aqua) and 13.2 h (S-NPP). Aqua drifts from about 13.2 h (2015-2022) to about 14.4 h in 2025 and Terra from about 10.9 h to about 9.7 h, while S-NPP stays near 13.1-13.2 h, so close-in-time Aqua-S-NPP matches become rarer after 2022 and Terra has almost no usable matches with S-NPP. `python -m src.harmonize` prints the real time gaps for your files.
+ - Do not train a correction model by randomly splitting nearby detections. Split by date or fire-event groups to avoid leakage.
++- A day with zero detections is not a day without observations: check `harmonized_status` (and the `*_observed` flags) before treating a zero as 'no fire'. Never fill a missing VIIRS day with MODIS.
++- A MODIS satellite is only harmonized if it has close-in-time overpasses with the VIIRS reference. In the Egypt files Aqua (13:30) does, Terra (10:30) does not; do not describe the Aqua k as a universal MODIS-to-VIIRS mapping.
++- The scale k is a ratio of totals conditional on a MODIS detection; it does not recover the many small fires only VIIRS detects (VIIRS sees ~56 times as many detections as Aqua over Egypt).
++- Cell-level metrics (active-cell ratios, cell correlations) depend on the grid size (`grid_sensitivity.csv`); a lat/lon cell is not equal-area (`cell_area_km2`).

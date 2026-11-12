@@ -1,0 +1,90 @@
+import os
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RAW_DIR = ROOT / "data" / "raw"
+# Sub-folder of data/ for every output. Change it to run a sensitivity analysis next to the main run
+# (e.g. PYRO_PROCESSED_SUBDIR=processed_nonstatic) without overwriting data/processed/.
+PROCESSED_DIR = ROOT / "data" / (os.getenv("PYRO_PROCESSED_SUBDIR") or "processed")
+
+# Optional time filter (inclusive, YYYY-MM-DD). None keeps everything in the files.
+START_DATE = os.getenv("PYRO_START") or None
+END_DATE = os.getenv("PYRO_END") or None
+
+# Optional region filter as "west,south,east,north". None = global (default).
+# Example: PYRO_BBOX="24.7,21.7,36.9,31.7" restricts to an Egypt-like box.
+# If west > east the box is treated as crossing the antimeridian.
+_bbox = os.getenv("PYRO_BBOX")
+BBOX = tuple(float(v) for v in _bbox.split(",")) if _bbox else None
+
+# Optional country mask: a GeoJSON Polygon/MultiPolygon in lon/lat. Applied AFTER PYRO_BBOX, so the
+# rectangle is only a coarse pre-filter. Example: PYRO_AOI_FILE=data/aoi/egypt.geojson
+_aoi = os.getenv("PYRO_AOI_FILE")
+AOI_FILE = (Path(_aoi) if Path(_aoi).is_absolute() else ROOT / _aoi) if _aoi else None
+
+# PYRO_EXCLUDE_STATIC=1 keeps only FIRMS type 0 (presumed vegetation fire) and drops static land sources
+# (type 2: flares, industry), offshore (type 3) and volcanoes (type 1). Rows without a type (NRT files) are kept.
+EXCLUDE_STATIC = os.getenv("PYRO_EXCLUDE_STATIC", "0") == "1"
+
+# Global VIIRS 375 m data is large: files are processed in chunks of this many rows.
+CHUNK_ROWS = int(os.getenv("PYRO_CHUNK", 500_000))
+
+# Phase B (harmonize.py)
+CELL_DEG = float(os.getenv("PYRO_CELL_DEG", 0.5))        # calendar grid size (degrees)
+MATCH_MAX_MIN = float(os.getenv("PYRO_MATCH_MIN", 180))  # max |time gap| MODIS<->VIIRS (minutes)
+DAY_TOL_MIN = float(os.getenv("PYRO_DAY_TOL_MIN", 30))   # slack when testing a UTC day is fully covered
+MIN_PAIRS_FIT = int(os.getenv("PYRO_MIN_PAIRS", 50))     # fewer matched pixels than this -> no FRP fit
+
+ 
+
+# --- Multi-year runs / trustworthy k (preprocess.py, harmonize.py) ---
+# k is fitted only on matched pixels whose median |time gap| is at most this many minutes.
+K_FIT_MAX_DT_MIN = float(os.getenv("PYRO_K_MAX_DT_MIN", 30))
+# A k fitted on fewer close-in-time matched pixels than this can never be graded HIGH.
+K_TRUST_MIN_PAIRS = int(os.getenv("PYRO_K_TRUST_PAIRS", 500))
+# harmonize.py refuses a standardized file bigger than this many (estimated) rows instead of
+# exhausting memory. Narrow it with PYRO_BBOX / PYRO_START / PYRO_END, or raise it if you have the RAM.
+MAX_ROWS = int(os.getenv("PYRO_MAX_ROWS", 15_000_000))
+# Set PYRO_DEDUPE=0 to skip the cross-file duplicate check when your files are known not to overlap.
+DEDUPE = os.getenv("PYRO_DEDUPE", "1") != "0"
+# VIIRS satellite used as the calendar reference. Default: the one observed on the most days.
+REF_SAT = os.getenv("PYRO_REF_SAT") or None
+
+# --- Harmonization hardening (harmonize.py, harmonize_validation.py) ---
+# A MODIS satellite is only given a scale k when it has its OWN close-in-time matches with VIIRS. By default a
+# satellite without them (e.g. Terra vs S-NPP: ~150 min apart) gets NO VIIRS-equivalent FRP (NaN), instead of
+# silently inheriting another satellite's k. PYRO_APPLY_UNVALIDATED_K=1 applies an own low-trust fit, or the k of
+# the best-validated satellite, and labels every such value (scale_basis) as unvalidated.
+APPLY_UNVALIDATED_K = os.getenv("PYRO_APPLY_UNVALIDATED_K", "0") == "1"
+# Cluster-bootstrap replicates for every confidence interval on k (10 000 keeps the Monte-Carlo error of a 95 %
+# interval width well below 1 percentage point, so a trust grade cannot flip because of the random seed).
+N_BOOT = int(os.getenv("PYRO_N_BOOT", 10_000))
+# k_trust can only be HIGH if the 95 % upper limit of the between-year SD of log k (tau) is at most this value.
+K_TAU_MAX = float(os.getenv("PYRO_K_TAU_MAX", 0.15))
+# Grid sizes (degrees) of the spatial-aggregation sensitivity analysis (harmonize_validation.grid_sensitivity).
+GRID_SENS_DEG = tuple(float(x) for x in (os.getenv("PYRO_GRID_SENS") or "0.05,0.1,0.25,0.5,1,2").split(","))
+# Partial-outage detector for the reference VIIRS series (see harmonize.flag_low_coverage). A day is flagged when
+#   (a) it has <= 1 overpass cluster AND fewer than COV_MIN_FRAC x the local median number of detections, or
+#   (b) it has fewer than COV_EXTREME_FRAC x the local median number of detections (a level reached by < 1 % of days),
+# but only where at least COV_MIN_EXPECTED detections per day are normal (a sparse region cannot reveal an outage this way).
+COV_MIN_FRAC = float(os.getenv("PYRO_COV_MIN_FRAC", 0.5))
+COV_EXTREME_FRAC = float(os.getenv("PYRO_COV_EXTREME_FRAC", 0.2))
+COV_MIN_EXPECTED = float(os.getenv("PYRO_COV_MIN_EXPECTED", 20))
+COV_CLUSTER_GAP_MIN = float(os.getenv("PYRO_COV_GAP_MIN", 25))   # minutes between detections that start a new overpass
+
+# --- Anomalies and critical burning windows (anomaly.py) ---
+ANOM_MIN_YEARS = int(os.getenv("PYRO_ANOM_MIN_YEARS", 5))   # fewer valid years -> flagged UNRELIABLE
+ANOM_Z = float(os.getenv("PYRO_ANOM_Z", 3.0))               # robust z for an anomalous day
+ANOM_WINDOW_DAYS = int(os.getenv("PYRO_ANOM_WINDOW", 7))    # +- days of season used for the baseline
+CRIT_PCT = float(os.getenv("PYRO_CRIT_PCT", 75))            # percentile of the climatology = "critical"
+# Statistical validation of the anomaly episodes (anomaly_validation.py). Set PYRO_ANOM_VALIDATE=0 to skip it.
+ANOM_VALIDATE = os.getenv("PYRO_ANOM_VALIDATE", "1") != "0"
+ANOM_INCLUDE_LOW_COVERAGE = os.getenv("PYRO_ANOM_INCLUDE_LOW_COVERAGE", "0") == "1"  # keep outage-suspect days in the analysis
+# PYRO_ANOM_DETREND=1 removes each year's median level before scoring. Off by default (keeps the baseline definition
+# of earlier runs), but anomaly_validation.json reports the annual-level trend and the effect of removing it: a
+# significant trend makes the leave-one-year-out baseline too low for early years and too high for late years.
+ANOM_DETREND = os.getenv("PYRO_ANOM_DETREND", "0") == "1"
+ANOM_REPLICATES = int(os.getenv("PYRO_ANOM_REPLICATES", 30))   # random-thinning replicates per scenario
+ANOM_NULL_SIMS = int(os.getenv("PYRO_ANOM_NULL_SIMS", 2000))   # Monte-Carlo records for the false-alarm null
+
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)

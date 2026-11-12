@@ -1,0 +1,34 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+settings.ps1
+settings.json
+
+# Raw satellite datasets
+data/raw/*
+!data/raw/.gitkeep
+
+# Generated data (ignored by default)
+data/processed/*
+!data/processed/.gitkeep
+!data/processed/*.png
+!data/processed/frp_mapping.json
+!data/processed/anomaly_report.json
+
+# Alternative generated directories
+data/processed_*/
