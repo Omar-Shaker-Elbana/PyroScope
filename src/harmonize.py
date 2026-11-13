@@ -40,7 +40,7 @@ from src import harmonize_validation as hv
 from src import kmodel
 from src.config import (
     PROCESSED_DIR, BBOX, START_DATE, END_DATE, CELL_DEG, MATCH_MAX_MIN, DAY_TOL_MIN, MIN_PAIRS_FIT,
-    K_FIT_MAX_DT_MIN, K_TRUST_MIN_PAIRS, MAX_ROWS, REF_SAT, AOI_FILE, EXCLUDE_STATIC,
+    K_FIT_MAX_DT_MIN, K_TRUST_MIN_PAIRS, REF_SAT, AOI_FILE, EXCLUDE_STATIC, OUT_OF_CORE, OUT_OF_CORE_ROWS,
     APPLY_UNVALIDATED_K, N_BOOT, K_TAU_MAX, GRID_SENS_DEG, COV_MIN_FRAC, COV_EXTREME_FRAC, COV_MIN_EXPECTED, COV_CLUSTER_GAP_MIN,
     K_MODEL, K_MODEL_BOOT, K_MODEL_FOLDS, K_MODEL_CLIP_Q,
     CLOUD_FILE, CLOUD_MIN_CLEAR, CLOUD_OBSCURE_NONZERO,
@@ -66,18 +66,17 @@ def slug(name) -> str:
 
 # --------------------------------------------------------------------------- loading
 def load(path):
+    """Load a standardized file for the legacy in-memory path (small datasets only)."""
     path = Path(path)
     if not path.exists():
         raise SystemExit(f"{path.name} not found. Run `python -m src.preprocess` first, and check that "
                          "PYRO_BBOX / PYRO_START / PYRO_END leave rows for BOTH sensors.")
-    est_rows = path.stat().st_size / 110.0  # a standardized row is ~110-130 bytes
-    if est_rows > MAX_ROWS:
-        raise SystemExit(
-            f"{path.name} holds roughly {est_rows:,.0f} rows (limit PYRO_MAX_ROWS={MAX_ROWS:,}). Matching keeps it "
-            "all in memory: narrow the run with PYRO_BBOX and/or PYRO_START / PYRO_END and run "
-            "`python -m src.preprocess` again, or raise PYRO_MAX_ROWS if you have the RAM.")
     df = pd.read_csv(path, usecols=lambda c: c in WANTED, parse_dates=["acq_datetime_utc"])
     df["source_satellite"] = df["source_satellite"].astype(str)
+    # Downcast high-volume numeric columns without changing timestamps or categorical labels.
+    for col in ("latitude", "longitude", "frp", "scan", "track", "brightness", "bright_ti4"):
+        if col in df:
+            df[col] = pd.to_numeric(df[col], errors="coerce", downcast="float")
     return df.sort_values("acq_datetime_utc").reset_index(drop=True)
 
 
@@ -493,12 +492,12 @@ def day_complete_flags(dates, t0, t1):
 
 
 def overpass_clusters(df, gap_min=None):
-    """Distinct overpass clusters per UTC day: consecutive detections more than `gap_min` minutes apart start a new
-    cluster. A polar orbiter crosses a region 2-4 times a day (day + night passes, neighbouring orbits), so a day with
-    ONE cluster has lost at least one pass."""
+    """Distinct overpass clusters per UTC day, or reuse exact precomputed counts on cell/day aggregates."""
     gap_min = COV_CLUSTER_GAP_MIN if gap_min is None else gap_min
     if df.empty:
         return pd.Series(dtype=float)
+    if "overpass_cluster_count" in df.columns:
+        return df.groupby("date")["overpass_cluster_count"].max().astype(float)
     t = df["acq_datetime_utc"]
     mins = ((t - t.dt.floor("D")).dt.total_seconds() / 60.0).to_numpy()
     s = pd.DataFrame({"date": df["date"].to_numpy(), "m": mins}).sort_values(["date", "m"])
@@ -559,7 +558,8 @@ def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None, clear
 
     def block(df, mask, name):
         g = df.groupby("date")
-        out = pd.DataFrame({"det": g.size(), "frp": g["frp"].sum(), "cells": g["cell_id"].nunique()}).reindex(days)
+        det = g["detection_count"].sum() if "detection_count" in df.columns else g.size()
+        out = pd.DataFrame({"det": det, "frp": g["frp"].sum(), "cells": g["cell_id"].nunique()}).reindex(days)
         out[["det", "frp", "cells"]] = out[["det", "frp", "cells"]].fillna(0.0)
         out.loc[~mask, :] = np.nan
         cal[f"{name}_detections"] = out["det"].astype("Int64")
@@ -589,7 +589,11 @@ def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None, clear
 
     vb = block(vr, v_obs, "viirs")
     cal["viirs_active_cells"] = vb["cells"].astype("Int64")
-    sat_share = vr.groupby("date")["i4_saturated"].mean().reindex(days) if len(vr) else pd.Series(np.nan, index=days)
+    if len(vr) and "i4_saturated_count" in vr.columns and "detection_count" in vr.columns:
+        sat_share = (vr.groupby("date")["i4_saturated_count"].sum() /
+                     vr.groupby("date")["detection_count"].sum()).reindex(days)
+    else:
+        sat_share = vr.groupby("date")["i4_saturated"].mean().reindex(days) if len(vr) else pd.Series(np.nan, index=days)
     sat_share[~v_obs] = np.nan
     cal["viirs_i4_saturated_share"] = sat_share
     clus = overpass_clusters(vr).reindex(days).fillna(0.0)
@@ -642,8 +646,9 @@ def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None, clear
     rows = pd.concat([m, v])
     rows["has_eq"] = rows["frp_equiv"].notna()
     rows["eq0"] = rows["frp_equiv"].fillna(0.0)
+    detections_agg = ("detection_count", "sum") if "detection_count" in rows.columns else ("frp", "size")
     cells = rows.groupby(["sensor_family", "source_satellite", "date", "cell_id", "cell_lat", "cell_lon"], as_index=False).agg(
-        detections=("frp", "size"), frp_mw=("frp", "sum"), frp_viirs_equiv_mw=("eq0", "sum"), n_eq=("has_eq", "sum"))
+        detections=detections_agg, frp_mw=("frp", "sum"), frp_viirs_equiv_mw=("eq0", "sum"), n_eq=("has_eq", "sum"))
     cells.loc[cells["n_eq"] == 0, "frp_viirs_equiv_mw"] = np.nan   # no scale != zero FRP
     cells = cells.drop(columns="n_eq")
     cells["cell_area_km2"] = cell_area_km2(cells["cell_lat"], CELL_DEG)
@@ -745,10 +750,35 @@ def cloud_summary(cal, info, min_clear, obscure_nonzero):
     return info
 
 
+def _estimate_csv_rows(path, sample_bytes=1_048_576):
+    """Estimate CSV rows from a small byte sample (rather than assuming a fixed row width)."""
+    size = path.stat().st_size
+    if size <= 0:
+        return 0
+    with path.open("rb") as stream:
+        sample = stream.read(sample_bytes)
+    line_count = sample.count(b"\n")
+    if line_count < 2:
+        return max(0, int(size / 120) - 1)
+    mean_bytes_per_line = len(sample) / line_count
+    return max(0, int(size / max(mean_bytes_per_line, 1.0)) - 1)
+
+
 def main():
+    modis_path = PROCESSED_DIR / "modis_standardized.csv"
+    viirs_path = PROCESSED_DIR / "viirs_standardized.csv"
+    if not modis_path.exists() or not viirs_path.exists():
+        raise SystemExit("Run `python -m src.preprocess` first; both standardized sensor files are required.")
+    estimated_rows = _estimate_csv_rows(modis_path) + _estimate_csv_rows(viirs_path)
+    force = OUT_OF_CORE in {"1", "true", "yes", "on"}
+    disable = OUT_OF_CORE in {"0", "false", "no", "off"}
+    if force or (not disable and estimated_rows >= OUT_OF_CORE_ROWS):
+        from src.harmonize_streaming import run as run_streaming
+        run_streaming()
+        return
     cloud_table = cloud_mask.read_table(CLOUD_FILE) if CLOUD_FILE is not None else None   # fail before the slow steps
-    m = load(PROCESSED_DIR / "modis_standardized.csv")
-    v = load(PROCESSED_DIR / "viirs_standardized.csv")
+    m = load(modis_path)
+    v = load(viirs_path)
     print(f"MODIS {len(m):,} rows, VIIRS {len(v):,} rows before clamping")
     m, v, t0, t1 = clamp_to_common_window(m, v)
     print(f"Common window: {t0} -> {t1}  (MODIS {len(m):,}, VIIRS {len(v):,} rows kept)")

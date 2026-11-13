@@ -54,7 +54,12 @@ Default is global with no date filter. Optional environment variables:
 |---|---|---|
 | `PYRO_START`, `PYRO_END` | Inclusive UTC date range | `2024-01-01`, `2024-12-31` |
 | `PYRO_BBOX` | `west,south,east,north`; west > east crosses the antimeridian | `24.7,21.7,36.9,31.7` |
-| `PYRO_CHUNK` | Rows per chunk | `200000` |
+| `PYRO_CHUNK` | Raw FIRMS rows per ingestion chunk | `200000` |
+| `PYRO_OUT_OF_CORE` | `auto` (default), `1` force disk-backed harmonization, `0` force legacy in-memory mode | `1` |
+| `PYRO_OUT_OF_CORE_ROWS` | Estimated combined MODIS + VIIRS rows at which `auto` switches to disk-backed harmonization | `3000000` |
+| `PYRO_STREAM_CHUNK_ROWS` | Standardized CSV rows staged per chunk (defaults to `PYRO_CHUNK`) | `200000` |
+| `PYRO_STREAM_SAMPLE_ROWS` | Maximum matched-pixel sample for conditional-k and ancillary diagnostics in streaming mode | `100000` |
+| `PYRO_STREAM_DIAGNOSTIC_ROWS` | Maximum raw-pixel sample per sensor for grid diagnostics | `150000` |
 | `PYRO_AOI_FILE` | GeoJSON polygon used as a country mask after the bbox | `data/aoi/egypt.geojson` |
 | `PYRO_EXCLUDE_STATIC` | `1` keeps only FIRMS `type` 0 (drops flares, industry, offshore, volcanoes) | `1` |
 | `PYRO_PROCESSED_SUBDIR` | Output folder under `data/` (for side-by-side sensitivity runs) | `processed_nonstatic` |
@@ -109,7 +114,7 @@ python -m src.download_firms --start 2015-01-01 --end 2025-12-31 --bbox 24.7,21.
    Default sources are `MODIS_SP` (Terra + Aqua) and `VIIRS_SNPP_SP`. VIIRS S-NPP 375 m starts 2012-01-20, NOAA-20 2018-04-01, NOAA-21 2023-03-01. `_SP` lags real time by about 5 months (use `_NRT` sources for the latest months). Without `--bbox` the request is global: tens of millions of VIIRS rows per year, so start with a region. Alternatively request files from the FIRMS archive page (https://firms.modaps.eosdis.nasa.gov/download/; delivered by e-mail) and save them in `data/raw/` with `modis` or `viirs` in the name.
 3. Run the pipeline with the same `PYRO_BBOX` for every step: `preprocess`, `plot_overview`, `harmonize`, `anomaly`.
 4. For a trustworthy `k`, include years when Aqua and S-NPP crossed the same place within minutes (S-NPP and Aqua both ~13:30 until Aqua's orbit was allowed to drift in the early 2020s; check the printed local solar times). Check `k_trust` of each satellite under `modis_satellites` in `frp_mapping.json`.
-5. Memory: `harmonize` keeps both standardized files in memory and stops with a message above `PYRO_MAX_ROWS` (15 million rows per file). For the whole planet, run region by region or year by year.
+5. Large-run processing: `preprocess` reads raw files in chunks and keeps cross-file deduplication keys in a temporary SQLite database. `harmonize` automatically switches to disk-backed processing when the estimated combined standardized row count reaches `PYRO_OUT_OF_CORE_ROWS` (default 3 million); use `PYRO_OUT_OF_CORE=1` to force it. See section 10 for memory and disk requirements.
 
 ## 8. Anomalies and critical burning windows
 
@@ -123,6 +128,22 @@ Needs `calendar_daily.csv` from `harmonize` covering several years (>= 2 to run,
 Outputs in `data/processed/`: `anomalies_daily.csv` (with `status`), `anomaly_events.csv` (episodes: >= 3 elevated days, peak z >= `PYRO_ANOM_Z`, default 3, plus the validation columns below), `critical_windows.csv` (days at/above the `PYRO_CRIT_PCT` percentile, default 75, of the multi-year median, with their share of annual FRP), `season_by_year.csv` (10 % / peak / 90 % of FRP per season), `anomaly_report.json`, `anomaly_overview.png`.
 
 **Validation (on by default, ~25 s; `PYRO_ANOM_VALIDATE=0` skips it).** A z-score above 3 does not prove that an event is exceptional, so every episode is re-tested: other baseline windows, an IQR instead of the MAD, earlier / later halves of the years, neighbouring years skipped, a causal past-only baseline, the annual level removed, random data loss (`PYRO_ANOM_REPLICATES`, default 30), the classical mean/SD z-score, and a Monte-Carlo null (`PYRO_ANOM_NULL_SIMS`, default 2000) estimated from the non-event days. It also checks residual seasonality, extreme-value distortion of the baseline, low flags next to gaps and on outage-suspect days, and the annual-level trend. `anomaly_events.csv` gains `robustness` (ROBUST / MODERATE / FRAGILE), `variants_detected` / `variants_testable`, `thinning_detection_rate`, `detected_by_classical_z`, `peak_pool_percentile`, `null_p_family_t` / `null_p_family_gaussian` and a text `assessment`. Full results: `anomaly_validation.json`, `anomaly_variants.csv`, `anomaly_event_variants.csv`, `anomaly_validation.png`. `robustness` is a statement about the statistics, not proof that fire activity was exceptional. 'low' flags can still be outages rather than less fire.
+
+## 9. Optional external validation against burned area (Edit 7)
+
+After `harmonize` and `anomaly`, you can compare each anomaly episode with NASA/LP DAAC MODIS MCD64A1 Collection 6.1 monthly burned-area granules. Download the HDF granules for the region and years you want to validate, then run:
+
+```bash
+python -m src.external_validation --mcd64-dir /path/to/MCD64A1
+```
+
+The defaults use `data/processed/anomaly_events.csv` and `data/processed/calendar_cells.csv`; outputs are `external_validation.csv` and `external_validation.json` in the configured processed directory. You can override inputs/outputs with `--events-csv`, `--cells-csv`, `--out-csv` and `--out-json`. Use `--collection 061` for Collection 6.1 (the default), `--cell-deg` to match `PYRO_CELL_DEG`, and `--min-coverage` to change the minimum valid land-pixel coverage required before a zero-burn result can be called confirmed.
+
+The event footprint is the set of VIIRS cells in `calendar_cells.csv` observed during that event. The tool reads the MCD64A1 `Burn Date`, `QA`, `First Day` and `Last Day` subdatasets by name; checks the exact event day-of-year interval across every month touched by the event; clips analysis to the event cells; calculates area from the source raster pixel transform; and compares the same calendar window in other archive years (leave-one-year-out seasonal reference). Spatial agreement is the share of event VIIRS cells containing at least one MCD64A1 burned pixel. Reports include a complete `burned_area_km2` only when coverage is adequate, a separate `burned_area_observed_km2` subtotal when coverage is partial, seasonal median / 90th percentile, event-to-baseline ratio, empirical baseline percentile, QA coverage, missing tile counts and spatial overlap.
+
+**Optional raster dependencies:** install `rasterio` and `pyproj` with `pip install rasterio pyproj`; the Rasterio/GDAL build must support HDF4. These are not added to `requirements.txt` and are not needed for the core pipeline or `python -m src.selftest`. The self-test exercises synthetic QA/date/coverage cases without real satellite files.
+
+Interpretation matters: `BURNED_AREA_DETECTED` is supporting evidence; `NO_BURN_IN_VALID_COVERAGE` means no burn was mapped in adequately covered event cells and dates; `MCD64_FILES_MISSING` and `INCONCLUSIVE_LOW_COVERAGE` are not negative evidence. A shortened mapping period, unmapped pixels and unburned special-condition QA codes are not silently counted as observed zero. MCD64A1 is a separate burned-area product, but it uses MODIS observations (including active-fire information) and is not a fully independent sensor family from MODIS inputs. Burned area and active-fire FRP are different quantities; do not expect one-to-one event matches. This optional check never changes anomaly scores or existing outputs.
 
 ## Important scientific notes
 
@@ -139,3 +160,24 @@ Outputs in `data/processed/`: `anomalies_daily.csv` (with `status`), `anomaly_ev
 - A MODIS satellite is only harmonized if it has close-in-time overpasses with the VIIRS reference. In the Egypt files Aqua (13:30) does, Terra (10:30) does not; do not describe the Aqua k as a universal MODIS-to-VIIRS mapping.
 - The scale k is a ratio of totals conditional on a MODIS detection; it does not recover the many small fires only VIIRS detects (VIIRS sees ~56 times as many detections as Aqua over Egypt).
 - Cell-level metrics (active-cell ratios, cell correlations) depend on the grid size (`grid_sensitivity.csv`); a lat/lon cell is not equal-area (`cell_area_km2`).
+
+
+## 10. Out-of-core processing for large archives (Edit 8)
+
+The normal commands are unchanged. By default, `python -m src.harmonize` estimates the combined row count of the two standardized CSVs from a small byte sample. At or above `PYRO_OUT_OF_CORE_ROWS` (default `3000000` combined rows), it runs the disk-backed implementation in `src/harmonize_streaming.py`; below that threshold it keeps using the established in-memory implementation. You can force either path:
+
+```bash
+# Force disk-backed processing
+PYRO_OUT_OF_CORE=1 python -m src.harmonize
+
+# Force the legacy in-memory implementation for comparison (only when RAM is sufficient)
+PYRO_OUT_OF_CORE=0 python -m src.harmonize
+```
+
+The large-run path requires no Dask or other new mandatory package. It uses Python's built-in SQLite support to stage standardized rows in bounded CSV chunks, match one MODIS/VIIRS satellite pair at a time for each UTC day, spill matched pairs and year-by-cell sufficient statistics to disk, and persist cell/day aggregates in SQLite. The daily calendar is assembled from SQL summaries; `calendar_cells.csv` and `matched_pairs.csv` are exported without loading the complete output files into pandas at once. Preprocessing also moves cross-chunk deduplication state from a growing in-memory hash array into a temporary SQLite table. Edit 7's event-cell lookup reads `calendar_cells.csv` in chunks, too.
+
+The headline constant `k`, its spatial-cell bootstrap interval, and per-year cell summaries use all qualifying matched pixels. The conditional `k` model and pixel-level ancillary diagnostics use a deterministic sample capped by `PYRO_STREAM_SAMPLE_ROWS` (default 100,000); cluster-unit diagnostic intervals use at most 10,000 sampled rows and 200 bootstrap replicates. Grid diagnostics use bounded samples (`PYRO_STREAM_DIAGNOSTIC_ROWS`, default 150,000 per sensor). These sample-based diagnostics are labelled in `frp_mapping.json`; they must not be described as exact full-archive estimates. `calendar_daily.csv` is built from full SQL aggregates, not from those samples.
+
+**Resource limits still apply.** Disk-backed processing trades RAM for temporary disk: allow substantial free space for SQLite indexes, matched-pair spill files and outputs (the exact amount depends on input size and overlap). Temporary staging files are removed after a successful run. Matching still holds one UTC day's rows for one MODIS satellite and the corresponding VIIRS time window in memory; an unusually dense single day can therefore require more RAM than an ordinary day. The default 0.5-degree analysis grid keeps the exact bootstrap's cell-level sufficient statistics bounded by the active grid cells, but very fine global grids increase that cost. `PYRO_OUT_OF_CORE=0` deliberately disables this protection.
+
+`python -m src.plot_overview` already scans standardized CSVs in chunks. `calendar_daily.csv` is a daily time series and remains small compared with the raw detections; downstream anomaly analysis continues to read that daily calendar.

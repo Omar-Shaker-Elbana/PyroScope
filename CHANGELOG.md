@@ -3,6 +3,22 @@
 Backend only (no frontend work). Evidence and reasoning: `docs/METHODOLOGY.md`. A unified diff against
 `pyroscope_modis_viirs_not_final.zip` is in `docs/CHANGES_vs_not_final.patch`.
 
+## Follow-up: external burned-area validation (review point 7)
+
+* New `src/external_validation.py`: optional event-level comparison with MODIS MCD64A1 Collection 6.1. It uses the
+  actual Phase C event columns (`start`, `end`) and derives each event footprint from VIIRS `cell_id` values in
+  `calendar_cells.csv`; it does not require invented event bounding-box columns.
+* Reads the named `Burn Date`, `QA`, `First Day` and `Last Day` HDF subdatasets, handles every month crossed by an event,
+  matches the Burn Date day-of-year to the event window, clips to event cells, and calculates burned area from the
+  source raster transform/CRS units.
+* Adds same-season leave-one-year-out burned-area baselines, empirical percentiles, cell-level overlap, QA coverage and
+  explicit statuses for partial coverage / missing tiles. A complete zero is emitted only when coverage is adequate;
+  partial observed area is kept in a separate field. Missing data is never converted to confirmed zero.
+* `README.md` and `docs/METHODOLOGY.md`: usage, optional HDF4-capable Rasterio/PyProj dependencies, QA semantics and
+  scientific interpretation. `src/selftest.py`: synthetic QA/date/coverage tests; no satellite files are needed for these.
+* No changes to anomaly scoring, harmonization, mandatory dependencies or existing output files. The external check is
+  run manually and does not download MCD64A1 granules.
+
 ## Follow-up: cloud-obscured days as a third observation status (review point 6)
 
 * New `src/cloud_mask.py`: reads and validates an optional daily clear-sky table (`PYRO_CLOUD_FILE`: `date`,
@@ -122,3 +138,14 @@ and the effect of a trend. Selftest and the full pipeline give the same results 
 scipy 1.11 and pandas 3.0 / numpy 2.5 / scipy 1.18. The whole chain (`preprocess`, `plot_overview`, `harmonize`, `anomaly`)
 was re-run from the raw files; outputs in `data/processed/` are current. `output.txt` (a console capture from before these
 changes) was not regenerated.
+
+
+## Follow-up: disk-backed out-of-core processing (review point 8)
+
+* `src/config.py` / `src/harmonize.py`: remove the fixed `PYRO_MAX_ROWS` stop. The normal `python -m src.harmonize` command now dispatches automatically to disk-backed processing above `PYRO_OUT_OF_CORE_ROWS` combined estimated rows (`PYRO_OUT_OF_CORE=1` forces streaming; `0` forces the legacy in-memory path).
+* New `src/harmonize_streaming.py`: chunk-stages both standardized CSVs into temporary SQLite tables; matches one UTC day and one satellite pair at a time; spills full matched pairs to disk; computes full-stream constant k and its cell bootstrap from disk-backed year/cell sufficient statistics; stores cell/day aggregates in SQLite; computes the complete daily calendar from SQL summaries; exports `calendar_cells.csv` in chunks. Conditional-k fitting and pixel-level diagnostics use deterministic bounded samples and are labelled in `frp_mapping.json`.
+* `src/preprocess.py`: keeps the existing raw chunking and outputs, but moves the cross-chunk duplicate-key history from an in-memory NumPy array to temporary SQLite storage.
+* `src/external_validation.py`: reads `calendar_cells.csv` in chunks when collecting VIIRS event cells, avoiding a full-calendar DataFrame per anomaly event.
+* Settings: `PYRO_OUT_OF_CORE`, `PYRO_OUT_OF_CORE_ROWS`, `PYRO_STREAM_CHUNK_ROWS`, `PYRO_STREAM_SAMPLE_ROWS` and `PYRO_STREAM_DIAGNOSTIC_ROWS`. No new mandatory dependency.
+* Tests: deterministic chunk-independent sample selection; streamed calendar and cell-output parity against the in-memory builder; exact disk-backed k/year-cell summaries; optional validation's chunked event-cell lookup; and a synthetic end-to-end out-of-core harmonization run.
+* Limits: disk space is traded for RAM; one instrument/day matching window still resides in memory, so unusually dense single days may require a regional split. The auto threshold is a heuristic, not a hard resource guarantee.

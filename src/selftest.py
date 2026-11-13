@@ -4,11 +4,15 @@ anomaly / validation code, all with a KNOWN answer. Nothing is read from or writ
 Run:  python -m src.selftest      (must finish with SELFTEST PASSED)
 """
 import json
+import sqlite3
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from src import anomaly, anomaly_validation, harmonize, harmonize_validation as hv, kmodel, kstats
+from src import (anomaly, anomaly_validation, external_validation, harmonize,
+                 harmonize_streaming, harmonize_validation as hv, kmodel, kstats, preprocess)
 from src.harmonize import add_features, match_pair, fit_scale
 
 TRUE_K = 1.6          # VIIRS-equivalent FRP = TRUE_K x MODIS FRP
@@ -616,6 +620,125 @@ def check_stub_season():
     print(f"stub season handled (last season has {int(seasons.iloc[-1]['valid_days'])} valid days)")
 
 
+
+def check_streaming_helpers():
+    """Exercise bounded staging, streamed calendar parity and exact disk-backed k statistics."""
+    rng = np.random.default_rng(44)
+    incoming = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=40),
+                             "latitude": rng.uniform(-20, 20, 40), "frp": rng.uniform(1, 20, 40)})
+    all_at_once = harmonize_streaming._sample_append(pd.DataFrame(), incoming, 12,
+                                                     ["date", "latitude", "frp"])
+    split = pd.DataFrame()
+    for frame in (incoming.iloc[:13], incoming.iloc[13:29], incoming.iloc[29:]):
+        split = harmonize_streaming._sample_append(split, frame, 12, ["date", "latitude", "frp"])
+    assert len(all_at_once) == len(split) == 12
+    assert set(all_at_once["_sample_hash"]) == set(split["_sample_hash"]), "bounded sample must be chunk-boundary invariant"
+
+    # Preprocessing must preserve the list-of-count-frames interface while its dedupe history spills to disk.
+    with tempfile.TemporaryDirectory(prefix="pyroscope_preprocess_test_") as td:
+        root = Path(td)
+        raw_dir, processed_dir = root / "raw", root / "processed"
+        raw_dir.mkdir(); processed_dir.mkdir()
+        raw_rows = pd.DataFrame([
+            {"latitude": 30.0, "longitude": 31.0, "acq_date": "2020-01-01", "acq_time": "1200",
+             "satellite": "A", "instrument": "MODIS", "confidence": "80", "frp": "10",
+             "daynight": "D", "brightness": "300", "scan": "1", "track": "1", "version": "061", "type": "0"},
+            {"latitude": 30.1, "longitude": 31.1, "acq_date": "2020-01-01", "acq_time": "1210",
+             "satellite": "A", "instrument": "MODIS", "confidence": "80", "frp": "12",
+             "daynight": "D", "brightness": "301", "scan": "1", "track": "1", "version": "061", "type": "0"},
+        ])
+        raw_rows.to_csv(raw_dir / "first_modis.csv", index=False)
+        raw_rows.iloc[[1]].to_csv(raw_dir / "overlap_modis.csv", index=False)
+        old = (preprocess.RAW_DIR, preprocess.PROCESSED_DIR, preprocess.CHUNK_ROWS, preprocess.DEDUPE)
+        try:
+            preprocess.RAW_DIR, preprocess.PROCESSED_DIR = raw_dir, processed_dir
+            preprocess.CHUNK_ROWS, preprocess.DEDUPE = 1, True
+            daily = preprocess.process_sensor("MODIS", "modis", processed_dir / "modis_standardized.csv")
+            written = pd.read_csv(processed_dir / "modis_standardized.csv")
+            assert isinstance(daily, list) and len(daily) == 1
+            assert len(written) == 2 and int(daily[0]["detections"].sum()) == 2
+            assert not list(processed_dir.glob("pyroscope_dedupe_*"))
+        finally:
+            (preprocess.RAW_DIR, preprocess.PROCESSED_DIR, preprocess.CHUNK_ROWS, preprocess.DEDUPE) = old
+
+    # The streaming SQL calendar must match the legacy calendar from the same raw synthetic detections.
+    _, _, args, _, _ = _calendar_case(n_viirs=3)
+    m, v, t0, _, observed, basis = args
+    t1 = pd.Timestamp("2016-03-03 23:59", tz="UTC")
+    m = m[m["date"] <= pd.Timestamp("2016-03-03")].copy()
+    v = v[v["date"] <= pd.Timestamp("2016-03-03")].copy()
+    with tempfile.TemporaryDirectory(prefix="pyroscope_stream_test_") as td:
+        db = sqlite3.connect(Path(td) / "calendar.sqlite")
+        try:
+            for d in sorted(m["date"].unique()):
+                day = m[m["date"] == d]
+                harmonize_streaming._aggregate_cells(day).to_sql("modis_cells", db, if_exists="append", index=False)
+            for d in sorted(v["date"].unique()):
+                day = v[v["date"] == d]
+                nclus = int(harmonize.overpass_clusters(day).iloc[0])
+                harmonize_streaming._aggregate_cells(day, nclus).to_sql("viirs_cells", db, if_exists="append", index=False)
+            got = harmonize_streaming._calendar_from_sql(db, "S-NPP", ["Aqua", "Terra"], t0, t1,
+                                                        observed, basis, None).set_index("date")
+            expected, expected_cells = harmonize.build_calendar(m, v, "S-NPP", t0, t1, observed, basis)
+            expected = expected.set_index("date")
+            for col in ("modis_detections", "viirs_detections", "modis_frp_mw", "viirs_frp_mw",
+                        "modis_active_cells", "viirs_active_cells", "viirs_overpass_clusters",
+                        "cells_active_in_both", "harmonized_status", "harmonized_frp_mw_viirs_equiv"):
+                a, b = got[col], expected[col]
+                if col == "harmonized_status":
+                    assert a.astype(str).equals(b.astype(str)), f"streamed calendar mismatch for {col}"
+                else:
+                    np.testing.assert_allclose(a.astype(float), b.astype(float), equal_nan=True,
+                                               err_msg=f"streamed calendar mismatch for {col}")
+            out_cells = Path(td) / "calendar_cells.csv"
+            harmonize_streaming._write_calendar_cells(db, out_cells, basis)
+            streamed_cells = pd.read_csv(out_cells).sort_values(
+                ["sensor_family", "source_satellite", "date", "cell_id"]).reset_index(drop=True)
+            expected_cells = expected_cells.sort_values(
+                ["sensor_family", "source_satellite", "date", "cell_id"]).reset_index(drop=True)
+            assert len(streamed_cells) == len(expected_cells)
+            np.testing.assert_allclose(streamed_cells["frp_mw"], expected_cells["frp_mw"], equal_nan=True)
+            np.testing.assert_allclose(streamed_cells["frp_viirs_equiv_mw"],
+                                       expected_cells["frp_viirs_equiv_mw"], equal_nan=True)
+        finally:
+            db.close()
+
+    # Full-stream k and its cluster bootstrap must remain exact while year-cell totals spill to SQLite.
+    rows = []
+    for year in (2015, 2016, 2017):
+        for pair_i in range(60):
+            day_i = pair_i % 20
+            ts = pd.Timestamp(f"{year}-01-01", tz="UTC") + pd.Timedelta(days=day_i, minutes=pair_i)
+            cell = 10_000_010 + (pair_i % 12)
+            rows.append({"source_satellite": "Aqua", "acq_datetime_utc": ts,
+                         "latitude": 0.5 + (cell % 12) * 0.1, "longitude": 1.5,
+                         "frp": 10.0, "viirs_frp_sum": 20.0, "viirs_frp_max": 20.0,
+                         "n_viirs": 1, "abs_dt_min": 5.0, "cell_id": cell,
+                         "daynight": "D", "type": 0, "version": "061",
+                         "confidence_class": "high", "viirs_satellite": "S-NPP"})
+    pairs = pd.DataFrame(rows)
+    with tempfile.TemporaryDirectory(prefix="pyroscope_fit_test_") as td:
+        pair_path = Path(td) / "pairs.csv"
+        pairs.to_csv(pair_path, index=False)
+        db = sqlite3.connect(Path(td) / "fit.sqlite")
+        old = (harmonize_streaming.N_BOOT, harmonize_streaming.K_MODEL,
+               harmonize.N_BOOT, harmonize.K_MODEL, harmonize.K_MODEL_BOOT)
+        try:
+            harmonize_streaming.N_BOOT = harmonize.N_BOOT = 40
+            harmonize_streaming.K_MODEL = harmonize.K_MODEL = False
+            harmonize.K_MODEL_BOOT = 40
+            k, info = harmonize_streaming._exact_fit_summary(db, pair_path, pairs, "Aqua")
+            assert k is not None and abs(k - 2.0) < 1e-12, f"streamed k should be exactly 2, got {k}"
+            assert info["n_pairs"] == 180 and info["n_cells"] == 12
+            assert set(info["k_by_year"]) == {"2015", "2016", "2017"}
+            assert not db.execute("SELECT name FROM sqlite_master WHERE name='fit_summary'").fetchone(), \
+                "temporary sufficient-statistics table should be removed"
+        finally:
+            (harmonize_streaming.N_BOOT, harmonize_streaming.K_MODEL,
+             harmonize.N_BOOT, harmonize.K_MODEL, harmonize.K_MODEL_BOOT) = old
+            db.close()
+    print("out-of-core helpers: chunk-stable sampling, calendar parity, streamed cell output and exact k passed")
+
 def main():
     check_stats_helpers()
     pairs, M, V = check_scale()
@@ -626,6 +749,9 @@ def main():
     check_grid(M, V)
     check_anomalies()
     check_stub_season()
+    external_validation.self_test()
+    print("external burned-area validation helpers passed (synthetic arrays; no HDF files required)")
+    check_streaming_helpers()
     print("SELFTEST PASSED")
 
 

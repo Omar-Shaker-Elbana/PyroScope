@@ -405,3 +405,110 @@ metrics move smoothly with the size.
 * `*_observed` flags are inferred from row counts. Cloud obscuration (section 2.5) needs an external daily clear-sky
   file; without one, an empty observed day under cloud is still read as a measured zero.
 * The seasonal window, MAD floor and episode rule are conventions, not estimates. The null model of section 3.4 is crude.
+
+---
+
+## 6. External burned-area validation (optional; `src/external_validation.py`)
+
+The anomaly episodes in `anomaly_events.csv` are statistical candidates. Edit 7 adds an optional outcome check against
+MODIS MCD64A1 Collection 6.1, a monthly 500 m burned-area product. Run it after `harmonize` and `anomaly`:
+
+```bash
+python -m src.external_validation --mcd64-dir /path/to/MCD64A1
+```
+
+By default it reads `anomaly_events.csv` and `calendar_cells.csv` from the configured processed directory and writes
+`external_validation.csv` / `external_validation.json`. The event footprint is the set of VIIRS `cell_id` values
+present in `calendar_cells.csv` between the episode's `start` and `end` dates. The requested `--cell-deg` must match
+the `PYRO_CELL_DEG` used to build that calendar. The tool does not use bounding boxes from the event CSV; those columns
+do not exist in the current Phase C event schema.
+
+### 6.1 Date, geometry and area
+
+MCD64A1 filenames encode the first day of the month as `AYYYYDDD` (for example, `A2020032` is 1 February 2020),
+not as an approximate 30-day month number. The code selects Collection 6.1 files by year, month and sinusoidal `hXXvYY`
+tile; it reads the named `Burn Date` and `QA` subdatasets (and `First Day` / `Last Day` when present). It evaluates every
+month touched by an episode and filters `Burn Date` to the exact event date interval within that month. Positive burn
+pixels are counted only where QA identifies land with sufficient valid data. Burned area uses the source raster's pixel
+transform and CRS units, not a hard-coded 0.25 km² pixel assumption.
+
+The spatial comparison is performed on the PyroScope event cells. Raster pixel centres are transformed from the
+MCD64A1 projection to longitude/latitude and assigned to the same `cell_id` convention used by `harmonize.py`. The
+reported overlap is the fraction of event VIIRS cells that contain at least one MCD64A1 burn pixel. This is explicitly
+a grid-level spatial agreement metric; it is not a pixel-level match of individual active-fire detections to burned
+pixels and depends on `PYRO_CELL_DEG`.
+
+### 6.2 QA, coverage and the seasonal reference
+
+For MCD64A1, QA bit 0 denotes land/water, bit 1 indicates sufficient valid data, and bit 2 flags a shortened mapping
+period. Bits 5–7 encode special conditions for some unburned pixels. For a positive burned-area finding, a pixel must
+be land, have the valid-data flag, have a valid positive `Burn Date`, and fall within the event dates. For a negative
+finding, the pixel must additionally have reliable temporal coverage of the entire event segment (bit 2 clear, or
+`First Day` / `Last Day` spanning the requested dates) and no unburned special-condition code. Missing monthly tile
+files are counted separately. The tool reports the fraction of land-pixel observations that meet these stricter
+coverage requirements.
+
+The seasonal reference repeats the same month/day window in each other year available in the local MCD64A1 archive,
+excluding the event's start year. Only reference periods with no missing expected tiles and at least the requested
+valid coverage (`--min-coverage`, default 0.80) contribute to the baseline. The report gives the median, 90th
+percentile, ratio to the median (undefined when the median is zero) and empirical percentile. A small or unavailable
+reference sample is reported as such; it is not replaced by zero. `burned_area_km2` is populated only when the event
+period has adequate complete coverage; `burned_area_observed_km2` is a separate partial subtotal, and must not be read as
+the total burned area when `coverage_complete` is false.
+
+Status meanings:
+
+* `BURNED_AREA_DETECTED`: one or more QA-valid burned pixels overlap the event dates and event cells, with sufficient
+  overall coverage.
+* `BURNED_AREA_DETECTED_PARTIAL_COVERAGE`: positive burn evidence exists, but the full footprint is not adequately
+  covered.
+* `NO_BURN_IN_VALID_COVERAGE`: no burn was mapped and the full expected tiles / valid spatial-temporal coverage meet
+  the threshold. This is a negative burned-area check, not proof that no active fire occurred.
+* `MCD64_FILES_MISSING`: one or more expected tile/month granules are absent; this must not be interpreted as no burn.
+* `INCONCLUSIVE_LOW_COVERAGE`: observations exist but do not provide enough valid coverage to confirm a no-burn result.
+* `NO_VIIRS_EVENT_CELLS`: the event has no VIIRS cell rows in the supplied calendar for its date range.
+
+### 6.3 Interpretation and limitations
+
+MCD64A1 burn date is an approximate date derived from a monthly reflectance time series, not an active-fire detection
+or an FRP measurement. A real event can have active-fire detections without a mapped burn scar (small, short-lived,
+cloud-obscured or non-vegetation fires are examples), and a mapped burned pixel need not correspond one-to-one with a
+FIRMS detection. MCD64A1 is a separate burned-area product, but it is based on MODIS observations and therefore is not
+a fully independent sensor family from MODIS inputs elsewhere in PyroScope. The validation is optional, does not
+change the anomaly score, and does not run automatically as part of `src.anomaly`.
+
+The HDF reader requires Rasterio and PyProj, with HDF4 support in the linked GDAL build. These are optional runtime
+dependencies and are intentionally not added to the core `requirements.txt`. `python -m src.selftest` tests the
+filename/date parsing, QA masking, area arithmetic, coverage classification and missing-data behavior using synthetic
+arrays; it does not validate an actual HDF driver or any downloaded MCD64A1 granule. Product details and QA semantics
+are documented in the [MCD64A1 Collection 6.1 User's Guide](https://lpdaac.usgs.gov/documents/1006/MCD64_User_Guide_V61.pdf)
+and the [LAADS MCD64A1 file specification](https://ladsweb.modaps.eosdis.nasa.gov/filespec/MODIS/61/MCD64A1/).
+
+
+---
+
+## 7. Out-of-core processing for large archives (Edit 8)
+
+The original large-run failure mode had two parts: the raw preprocessing path retained every historical deduplication hash in a NumPy array, and `harmonize.py` loaded the complete MODIS and VIIRS standardized CSVs (plus matched-pair and cell/day tables) into pandas. Edit 8 adds an optional disk-backed route without changing the normal CLI or requiring Dask.
+
+### 7.1 Dispatch and ingestion
+
+`PYRO_OUT_OF_CORE=auto` is the default. `harmonize.py` estimates the combined standardized row count from a 1 MiB sample of each CSV and switches to `src.harmonize_streaming` at `PYRO_OUT_OF_CORE_ROWS` (default 3,000,000). `PYRO_OUT_OF_CORE=1` forces the disk-backed path; `PYRO_OUT_OF_CORE=0` forces the legacy in-memory reference path. The threshold is a dispatch heuristic, not a hard memory guarantee.
+
+`preprocess.py` already reads FIRMS sources in `PYRO_CHUNK` row batches. Edit 8 keeps the same filtering and output schema, but stores cross-chunk duplicate keys in a temporary SQLite table instead of retaining an ever-growing in-memory hash array. Daily coverage counts remain in a compact day/satellite dictionary; the standardized CSVs and `daily_detection_counts.csv` retain their existing filenames and schema. `PYRO_DEDUPE=0` still disables cross-file deduplication explicitly.
+
+### 7.2 Disk-backed harmonization
+
+The streaming harmonizer stages standardized files into temporary SQLite tables in `PYRO_STREAM_CHUNK_ROWS` batches (default `PYRO_CHUNK`). It indexes UTC timestamps, queries one UTC day at a time, and matches one MODIS satellite against one VIIRS satellite and its `MATCH_MAX_MIN` time window. Full matched-pair results are appended to temporary CSV spill files. The exact constant-k numerator/denominator sufficient statistics are aggregated by year and spatial cell into SQLite; only the final per-cell array needed by the configured bootstrap is brought into memory. Per-year cell arrays are queried one year at a time, rather than retaining a Python dictionary for every year/cell combination.
+
+After the scales are selected, detections are revisited one instrument/day at a time and aggregated to sensor/satellite/date/cell rows. Those cell/day aggregates are written to SQLite, not concatenated into one multi-year pandas frame. Daily totals, active-cell counts, saturation shares, overpass clusters, and cross-sensor cell overlap are calculated with SQL queries over these aggregates. `calendar_cells.csv` is exported with a bounded pandas chunk size; the daily calendar is built from full aggregates. The existing CSV filenames and principal columns are preserved, so Edit 7 and the anomaly pipeline continue to consume the same artifacts.
+
+### 7.3 Exact versus sampled calculations
+
+The headline constant `k`, its cell-cluster bootstrap interval, full matched-pair counts and year-by-cell summaries use all qualifying close-in-time pairs. This is not a sample estimate. Conditional-model fitting and pixel-level diagnostics necessarily require pixel rows in pandas; in out-of-core mode they use a deterministic bounded sample (`PYRO_STREAM_SAMPLE_ROWS`, default 100,000). Grid diagnostics use bounded raw-pixel samples (`PYRO_STREAM_DIAGNOSTIC_ROWS`, default 150,000 per sensor). Cluster-unit sensitivity uses at most 10,000 sampled pairs and at most 200 bootstrap replicates. `frp_mapping.json` records these caps and labels the sample-based quantities. `calendar_daily.csv` and `calendar_cells.csv` are generated from the full staged data, not the diagnostic sample.
+
+### 7.4 Resource limits and interpretation
+
+This is out-of-core processing, not infinite-memory processing. It needs substantial temporary disk space for SQLite tables/indexes, matched-pair spill files and outputs; the required space depends on the source archive and the number of matched pairs. Temporary staging files live under the configured processed directory and are removed when the run completes. Matching still loads one UTC day for one MODIS satellite and the matching VIIRS time window into memory. A single extraordinarily dense day can therefore remain a RAM bottleneck; exceptionally large one-day workloads should be pre-partitioned geographically or temporally. A very fine global `PYRO_CELL_DEG` also increases the number of spatial bootstrap clusters.
+
+`plot_overview.py` already scans standardized CSVs by chunk, and the anomaly stage works on the much smaller daily calendar. Optional burned-area validation now scans the potentially large cell calendar in chunks when it constructs an event footprint. No new mandatory Python package is introduced. Synthetic tests compare streamed calendar outputs with the legacy calendar and test deterministic sampling and exact disk-backed `k` statistics; they cannot replace a representative full-archive benchmark on the user's hardware.

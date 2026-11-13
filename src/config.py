@@ -42,9 +42,11 @@ MIN_PAIRS_FIT = int(os.getenv("PYRO_MIN_PAIRS", 50))     # fewer matched pixels 
 K_FIT_MAX_DT_MIN = float(os.getenv("PYRO_K_MAX_DT_MIN", 30))
 # A k fitted on fewer close-in-time matched pixels than this can never be graded HIGH.
 K_TRUST_MIN_PAIRS = int(os.getenv("PYRO_K_TRUST_PAIRS", 500))
-# harmonize.py refuses a standardized file bigger than this many (estimated) rows instead of
-# exhausting memory. Narrow it with PYRO_BBOX / PYRO_START / PYRO_END, or raise it if you have the RAM.
-MAX_ROWS = int(os.getenv("PYRO_MAX_ROWS", 15_000_000))
+# Large archives automatically switch to the disk-backed, day-batched harmonizer.
+# PYRO_OUT_OF_CORE=1 forces streaming; PYRO_OUT_OF_CORE=0 selects the legacy in-memory path.
+# The row threshold is a dispatch heuristic based on combined standardized input rows, not a hard cap.
+OUT_OF_CORE = os.getenv("PYRO_OUT_OF_CORE", "auto").strip().lower()
+OUT_OF_CORE_ROWS = int(os.getenv("PYRO_OUT_OF_CORE_ROWS", 3_000_000))
 # Set PYRO_DEDUPE=0 to skip the cross-file duplicate check when your files are known not to overlap.
 DEDUPE = os.getenv("PYRO_DEDUPE", "1") != "0"
 # VIIRS satellite used as the calendar reference. Default: the one observed on the most days.

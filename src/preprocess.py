@@ -1,4 +1,7 @@
 import json
+import sqlite3
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -157,77 +160,103 @@ def process_sensor(label, keyword, out_path):
     out_path.unlink(missing_ok=True)  # never leave a stale file from an earlier run
     n_raw = n_kept = n_dup = 0
     first = True
-    daily = []
-    seen = np.empty(0, dtype=np.uint64)  # sorted hashes of (satellite, lat, lon, UTC time) already written
+    daily_counts = {}  # bounded by number of days x satellites, not number of detections
+    # Deduplication state lives on disk: a global uint64 NumPy set grows with the entire archive.
+    dedupe_tmp = tempfile.TemporaryDirectory(prefix="pyroscope_dedupe_", dir=PROCESSED_DIR) if DEDUPE else None
+    dedupe_db = sqlite3.connect(Path(dedupe_tmp.name) / "seen.sqlite") if dedupe_tmp else None
+    if dedupe_db is not None:
+        dedupe_db.execute("PRAGMA journal_mode=WAL")
+        dedupe_db.execute("PRAGMA synchronous=NORMAL")
+        dedupe_db.execute("PRAGMA temp_store=FILE")
+        dedupe_db.execute("CREATE TABLE seen (key TEXT PRIMARY KEY) WITHOUT ROWID")
+        dedupe_db.execute("CREATE TEMP TABLE candidates (key TEXT PRIMARY KEY, row_idx INTEGER) WITHOUT ROWID")
     raw_rows_per_day = {}  # UTC day -> raw rows in the file, before any AOI/date filter
     raw_rows_by_sat = {}   # satellite name -> {UTC day -> raw rows}: an outage of ONE satellite must stay visible
     t_min = t_max = None  # observation coverage of the raw files, before any AOI/date filter
-    for path in find_files(RAW_DIR, keyword):
-        print(f"{label}: reading {path.name}")
-        for chunk in iter_firms_csv(path, CHUNK_ROWS):
-            n_raw += len(chunk)
-            std = standardize(chunk, label)
+    try:
+        for path in find_files(RAW_DIR, keyword):
+            print(f"{label}: reading {path.name}")
+            for chunk in iter_firms_csv(path, CHUNK_ROWS):
+                n_raw += len(chunk)
+                std = standardize(chunk, label)
 
-            raw_t = pd.to_datetime(
-                chunk["acq_date"].astype(str) + " "
-                + chunk["acq_time"].astype(str).str.replace(r"\.0$", "", regex=True)
-                .str.replace(r"\D", "", regex=True).str.zfill(4),
-                format="%Y-%m-%d %H%M", errors="coerce", utc=True,
-            )
-            if raw_t.notna().any():
-                lo, hi = raw_t.min(), raw_t.max()
-                t_min = lo if t_min is None else min(t_min, lo)
-                t_max = hi if t_max is None else max(t_max, hi)
-                for day, cnt in raw_t.dropna().dt.strftime("%Y-%m-%d").value_counts().items():
-                    raw_rows_per_day[day] = raw_rows_per_day.get(day, 0) + int(cnt)
-                raw_sat = (chunk["satellite"].astype("string").str.strip().replace(SATELLITE_NAMES).fillna("unknown")
-                           if "satellite" in chunk.columns else pd.Series("unknown", index=chunk.index))
-                by_sat = pd.DataFrame({"day": raw_t.dt.strftime("%Y-%m-%d"), "sat": raw_sat.astype(str)}).dropna()
-                for (sat, day), cnt in by_sat.groupby(["sat", "day"]).size().items():
-                    d = raw_rows_by_sat.setdefault(str(sat), {})
-                    d[day] = d.get(day, 0) + int(cnt)
+                raw_t = pd.to_datetime(
+                    chunk["acq_date"].astype(str) + " "
+                    + chunk["acq_time"].astype(str).str.replace(r"\.0$", "", regex=True)
+                    .str.replace(r"\D", "", regex=True).str.zfill(4),
+                    format="%Y-%m-%d %H%M", errors="coerce", utc=True,
+                )
+                if raw_t.notna().any():
+                    lo, hi = raw_t.min(), raw_t.max()
+                    t_min = lo if t_min is None else min(t_min, lo)
+                    t_max = hi if t_max is None else max(t_max, hi)
+                    for day, cnt in raw_t.dropna().dt.strftime("%Y-%m-%d").value_counts().items():
+                        raw_rows_per_day[day] = raw_rows_per_day.get(day, 0) + int(cnt)
+                    raw_sat = (chunk["satellite"].astype("string").str.strip().replace(SATELLITE_NAMES).fillna("unknown")
+                               if "satellite" in chunk.columns else pd.Series("unknown", index=chunk.index))
+                    by_sat = pd.DataFrame({"day": raw_t.dt.strftime("%Y-%m-%d"), "sat": raw_sat.astype(str)}).dropna()
+                    for (sat, day), cnt in by_sat.groupby(["sat", "day"]).size().items():
+                        d = raw_rows_by_sat.setdefault(str(sat), {})
+                        d[day] = d.get(day, 0) + int(cnt)
 
-            if len(std):
-                # Drop detections already written from an earlier chunk or file
-                # (e.g. overlapping 24h / 48h / 7d downloads).
-                keys = pd.util.hash_pandas_object(
-                    std[["source_satellite", "latitude", "longitude", "acq_datetime_utc"]],
-                    index=False,
-                ).to_numpy()
-                if DEDUPE:
-                    fresh = np.zeros(len(keys), dtype=bool)
-                    fresh[np.unique(keys, return_index=True)[1]] = True  # first occurrence inside this chunk
-                    if len(seen):  # ... and not written by an earlier chunk or file
-                        pos = np.minimum(np.searchsorted(seen, keys), len(seen) - 1)
-                        fresh &= seen[pos] != keys
-                    seen = np.union1d(seen, keys[fresh])
-                else:
-                    fresh = np.ones(len(keys), dtype=bool)
-                n_dup += int((~fresh).sum())
-                std = std[fresh]
-            n_kept += len(std)
-            if len(std) == 0:
-                continue
-            std.to_csv(out_path, mode="w" if first else "a",
-                       header=first, index=False)
-            first = False
-            day = std["acq_datetime_utc"].dt.floor("D").dt.tz_localize(None)
-            daily.append(
-                std.assign(date=day)
-                .groupby(["sensor_family", "source_satellite", "date"])
-                .size().rename("detections").reset_index()
-            )
-    if t_min is not None:
-        (PROCESSED_DIR / f"{label.lower()}_coverage.json").write_text(
-            json.dumps({"start_utc": str(t_min), "end_utc": str(t_max),
-                        "raw_rows_per_day": dict(sorted(raw_rows_per_day.items())),
-                        "raw_rows_per_day_by_satellite": {s: dict(sorted(d.items())) for s, d in sorted(raw_rows_by_sat.items())}}))
+                if len(std):
+                    # Drop detections already written from an earlier chunk or file
+                    # (e.g. overlapping 24h / 48h / 7d downloads).
+                    keys = pd.util.hash_pandas_object(
+                        std[["source_satellite", "latitude", "longitude", "acq_datetime_utc"]],
+                        index=False,
+                    ).to_numpy()
+                    if DEDUPE:
+                        # Stage one chunk's unique hashes in SQLite, identify hashes not yet committed,
+                        # then commit them. RAM use is O(chunk size); history is disk-backed.
+                        unique_idx = np.unique(keys, return_index=True)[1]
+                        dedupe_db.execute("DELETE FROM candidates")
+                        dedupe_db.executemany(
+                            "INSERT OR IGNORE INTO candidates(key, row_idx) VALUES (?, ?)",
+                            ((str(int(keys[i])), int(i)) for i in unique_idx),
+                        )
+                        fresh_idx = pd.read_sql_query(
+                            "SELECT c.row_idx FROM candidates c LEFT JOIN seen s ON s.key=c.key "
+                            "WHERE s.key IS NULL ORDER BY c.row_idx", dedupe_db
+                        )["row_idx"].to_numpy(dtype=int)
+                        fresh = np.zeros(len(keys), dtype=bool)
+                        fresh[fresh_idx] = True
+                        dedupe_db.execute("INSERT OR IGNORE INTO seen(key) SELECT key FROM candidates")
+                        dedupe_db.commit()
+                    else:
+                        fresh = np.ones(len(keys), dtype=bool)
+                    n_dup += int((~fresh).sum())
+                    std = std[fresh]
+                n_kept += len(std)
+                if len(std) == 0:
+                    continue
+                std.to_csv(out_path, mode="w" if first else "a",
+                           header=first, index=False)
+                first = False
+                day = std["acq_datetime_utc"].dt.floor("D").dt.tz_localize(None)
+                counts = (std.assign(date=day)
+                          .groupby(["sensor_family", "source_satellite", "date"])
+                          .size())
+                for key, count in counts.items():
+                    daily_counts[key] = daily_counts.get(key, 0) + int(count)
+        if t_min is not None:
+            (PROCESSED_DIR / f"{label.lower()}_coverage.json").write_text(
+                json.dumps({"start_utc": str(t_min), "end_utc": str(t_max),
+                            "raw_rows_per_day": dict(sorted(raw_rows_per_day.items())),
+                            "raw_rows_per_day_by_satellite": {s: dict(sorted(d.items())) for s, d in sorted(raw_rows_by_sat.items())}}))
+    finally:
+        if dedupe_db is not None:
+            dedupe_db.close()
+            dedupe_tmp.cleanup()
     print(f"{label} raw rows: {n_raw:,} | kept: {n_kept:,} | "
           f"duplicates removed across chunks/files: {n_dup:,}")
     if first:
         print(f"WARNING: no {label} rows survived filtering "
               "(check PYRO_START / PYRO_END / PYRO_BBOX).")
-    return daily
+    if not daily_counts:
+        return []
+    return [pd.Series(daily_counts, dtype="int64").rename("detections").rename_axis(
+        ["sensor_family", "source_satellite", "date"]).reset_index()]
 
 def main():
     scope = "global" if BBOX is None else f"bbox {BBOX}"
@@ -248,7 +277,7 @@ def main():
     # for overpass times and detection sensitivity.
     if daily:
         counts = (
-            pd.concat(daily)
+            pd.concat(daily, ignore_index=True)
             .groupby(["sensor_family", "source_satellite", "date"], as_index=False)
             ["detections"].sum()
             .sort_values(["sensor_family", "source_satellite", "date"])

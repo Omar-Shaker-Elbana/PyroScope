@@ -52,6 +52,10 @@ def bootstrap_ratio(arr, rng, n_boot: int, chunk: int = 250) -> np.ndarray:
     arr = np.asarray(arr, float)
     n = len(arr)
     out = np.empty(n_boot)
+    # Keep the temporary index matrix below roughly two million integers.  The
+    # old fixed 250-replicate batch could allocate gigabytes for global runs with
+    # hundreds of thousands of spatial clusters.
+    chunk = max(1, min(int(chunk), 2_000_000 // max(n, 1)))
     for s in range(0, n_boot, chunk):
         b = min(chunk, n_boot - s)
         idx = rng.integers(0, n, size=(b, n))
