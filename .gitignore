@@ -71,3 +71,6 @@ data/processed_*/
 tmp/
 output.tst
 HotSync_harmonized Final.html
+
+# Generated output
+output.txt
