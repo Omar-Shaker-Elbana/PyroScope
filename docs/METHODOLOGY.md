@@ -327,6 +327,32 @@ rule. The family-wise p of an episode is the share of null records containing an
 This is a screen, not a significance test: it is stationary, has one lag of memory and no knowledge of sensor,
 algorithm, land-cover or fuel changes. FRP alone cannot test those.
 
+### 3.5 HotSync-style active-cell anomaly score
+
+`src.hotsync_anomaly` adds a second, count-based signal beside the primary FRP anomaly detector. It is run automatically
+by `python -m src.anomaly` and does not change `anomalies_daily.csv`'s existing FRP `z` or the validated FRP episodes.
+
+The activity metric is the daily number of active grid cells. On complete, valid VIIRS days where MODIS was also observed,
+it uses the sensor union `MODIS cells + VIIRS cells - cells active in both`. When MODIS is not observed but VIIRS is valid,
+it converts the VIIRS cell count to the union scale using the ratio of summed union counts to summed VIIRS counts on
+at least `PYRO_HOTSYNC_ANOM_MIN_OVERLAP_DAYS` (default 30) overlap days. If that calibration is unavailable, it uses
+VIIRS counts alone for the whole run instead of mixing incompatible scales. **MODIS-only days are never scored**; the
+VIIRS validity mask, including outage and cloud exclusions, remains authoritative.
+
+For each target day, the baseline is the mean activity within +/- `PYRO_HOTSYNC_ANOM_WINDOW` days of the same day of
+year in all other years, with at least `PYRO_HOTSYNC_ANOM_MIN_POOL` values. The HotSync Z-score is
+
+`z_activity = (observed - seasonal_mean) / max(seasonal_population_sd, 1 + sqrt(seasonal_mean))`.
+
+A day is flagged high at `PYRO_HOTSYNC_ANOM_Z` (default 2.5) and only scored when activity is at least
+`PYRO_HOTSYNC_ANOM_MIN_ACTIVITY` (default 5). This is a mean/SD score, not the robust median/MAD score used for FRP.
+
+The daily file gains `hotsync_activity_count`, `hotsync_activity_baseline`, `hotsync_activity_ratio`,
+`hotsync_activity_z`, `hotsync_activity_flag` and `hotsync_activity_source`. Additional outputs are
+`hotsync_activity_anomalies.csv` (up to eight strongest, non-neighbouring days) and
+`hotsync_activity_overview.png`. The method uses PyroScope's `PYRO_CELL_DEG` grid (default 0.5 degrees), not
+HotSync's ~2 km grid, so numerical activity counts are not directly comparable between the applications.
+
 ---
 
 ## 4. Spatial resolution and the 0.5 degree grid

@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src import (anomaly, anomaly_validation, external_validation, harmonize,
+from src import (anomaly, anomaly_validation, external_validation, harmonize, hotsync_anomaly,
                  harmonize_streaming, harmonize_validation as hv, kmodel, kstats, preprocess)
 from src.harmonize import add_features, match_pair, fit_scale
 
@@ -604,6 +604,52 @@ def check_anomalies():
     assert tr["p"] < 0.01 and tr["relative_change_per_year"] < -0.05, "the trend check must see a -12 %/yr decline"
 
 
+def check_hotsync_activity_anomalies():
+    """The HotSync-style active-cell Z-score detects a planted spike and respects VIIRS gaps."""
+    idx = pd.date_range("2015-01-01", "2022-12-31", freq="D")
+    cal = pd.DataFrame(index=idx)
+    cal["valid"] = True
+    cal["doy"] = anomaly.doy365(idx.to_series())
+    cal["year"] = idx.year
+    cal["viirs_active_cells"] = 10.0
+    cal["modis_active_cells"] = 8.0
+    cal["cells_active_in_both"] = 5.0
+    cal["modis_observed"] = True
+    cal["viirs_observed"] = True
+
+    spike = pd.Timestamp("2019-06-15")
+    cal.loc[spike, "modis_active_cells"] += 100.0
+    viirs_only = pd.Timestamp("2021-08-15")
+    cal.loc[viirs_only, ["modis_observed", "modis_active_cells", "cells_active_in_both"]] = [False, np.nan, np.nan]
+    missing = pd.Timestamp("2020-03-15")
+    cal.loc[missing, "valid"] = False
+    cal.loc[missing, "viirs_active_cells"] = np.nan
+    # Even strong MODIS-only evidence must not fill a VIIRS-unobserved day.
+    cal.loc[missing, "modis_active_cells"] = 500.0
+
+    scored, info = hotsync_anomaly.score_activity(cal)
+    assert info["calibrated_to_sensor_union"], "overlap days should calibrate VIIRS activity to the sensor union"
+    assert scored.loc[spike, "hotsync_activity_flag"] == "high", "planted active-cell spike not detected"
+    assert scored.loc[spike, "hotsync_activity_z"] >= 2.5, "HotSync Z-score is below its default threshold"
+    assert scored.loc[viirs_only, "hotsync_activity_source"] == "VIIRS scaled to union", "VIIRS-only day should use overlap scale"
+    assert np.isfinite(scored.loc[viirs_only, "hotsync_activity_count"]), "VIIRS-only day should remain scoreable"
+    assert pd.isna(scored.loc[missing, "hotsync_activity_z"]), "MODIS must not fill a VIIRS-unobserved day"
+    events = hotsync_anomaly.top_anomalies(scored)
+    assert not events.empty and events.iloc[0]["date"] == spike.date().isoformat(), "top anomaly list missed the planted spike"
+
+    # Without enough overlap, the series deliberately falls back to VIIRS-only
+    # rather than mixing uncalibrated sensor counts.
+    no_overlap = cal.copy()
+    no_overlap["modis_observed"] = False
+    no_overlap["modis_active_cells"] = np.nan
+    no_overlap["cells_active_in_both"] = np.nan
+    raw, raw_info = hotsync_anomaly.score_activity(no_overlap)
+    assert not raw_info["calibrated_to_sensor_union"], "no-overlap data must not claim a union calibration"
+    assert raw.loc[spike, "hotsync_activity_source"] == "VIIRS only (uncalibrated)"
+    print(f"HotSync-style activity anomaly: planted spike Z={scored.loc[spike, 'hotsync_activity_z']:.2f}; "
+          f"VIIRS-to-union scale={info['viirs_to_union_scale']:.3f}")
+
+
 def check_stub_season():
     """A record that ends a few days into a new season must not crash season_by_year (it did on real data)."""
     rng = np.random.default_rng(3)
@@ -748,6 +794,7 @@ def main():
     check_cloud()
     check_grid(M, V)
     check_anomalies()
+    check_hotsync_activity_anomalies()
     check_stub_season()
     external_validation.self_test()
     print("external burned-area validation helpers passed (synthetic arrays; no HDF files required)")

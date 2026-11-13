@@ -1,5 +1,4 @@
-
-# ==========================================
+﻿# ==========================================
 # Python
 # ==========================================
 __pycache__/
@@ -70,7 +69,31 @@ data/processed_*/
 .temp/
 tmp/
 output.tst
+output.txt
+output-old.txt
+session
 HotSync_harmonized Final.html
 
-# Generated output
-output.txt
+# ==========================================
+# Local MCD64A1 archive and download state
+# ==========================================
+MCD64A1/[0-9][0-9][0-9][0-9]/
+MCD64A1/*.hdf
+MCD64A1/*.bak
+MCD64A1/*.backup
+MCD64A1/__pycache__/
+MCD64A1/download_manifest.csv
+MCD64A1/download_manifest.before_*.csv
+MCD64A1/.mcd64_download.conf
+MCD64A1/.mcd64_cookies.txt
+
+# Local recovery backups
+MCD64A1_repair_backup_*/
+external_validation_backup_*/
+external_validation_retry_backup_*/
+
+# Local diagnostic logs and reports
+*_stdout.txt
+*_stderr.txt
+mcd64_gdal_scan_*.txt
+mcd64_target_test_*.txt

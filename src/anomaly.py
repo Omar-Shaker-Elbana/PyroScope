@@ -40,6 +40,7 @@ from src.config import (
     PROCESSED_DIR, ANOM_MIN_YEARS, ANOM_Z, ANOM_WINDOW_DAYS, CRIT_PCT, ANOM_VALIDATE, ANOM_INCLUDE_LOW_COVERAGE,
     ANOM_DETREND,
 )
+from src import hotsync_anomaly
 
 VALUE_COL = "harmonized_frp_mw_viirs_equiv"
 Z_EVENT = 2.0          # a day is "elevated" at or above this robust z
@@ -346,6 +347,10 @@ def main():
     reliable = not reasons
 
     df = score(cal)
+    # Keep PyroScope's robust FRP detector as the primary result, and add a
+    # separate HotSync-style active-cell Z-score for count-based comparison.
+    hotsync_scores, hotsync_info = hotsync_anomaly.score_activity(cal)
+    hotsync_events = hotsync_anomaly.top_anomalies(hotsync_scores)
     events = find_events(df)
     validation = None
     if ANOM_VALIDATE:
@@ -357,8 +362,11 @@ def main():
     seasons = season_by_year(df, season_start_doy)
 
     out = df[["value", "valid", "status", "baseline_mw", "ratio_to_baseline", "z", "flag"]].rename(columns={"value": "frp_mw"})
+    out = out.join(hotsync_scores)
     out.to_csv(PROCESSED_DIR / "anomalies_daily.csv")
     events.to_csv(PROCESSED_DIR / "anomaly_events.csv", index=False)
+    hotsync_events.to_csv(PROCESSED_DIR / "hotsync_activity_anomalies.csv", index=False)
+    hotsync_anomaly.plot_activity(hotsync_scores, PROCESSED_DIR / "hotsync_activity_overview.png")
     windows.to_csv(PROCESSED_DIR / "critical_windows.csv", index=False)
     seasons.to_csv(PROCESSED_DIR / "season_by_year.csv", index=False)
     plot(df, events, windows, sm, season_start_doy, seasons)
@@ -380,6 +388,12 @@ def main():
         "episode_robustness": ({} if validation is None else
                                {k: int(v) for k, v in events["robustness"].value_counts().items()}),
         "validation_file": None if validation is None else "anomaly_validation.json",
+        "hotsync_activity": {
+            **hotsync_info,
+            "flagged_days": int((hotsync_scores["hotsync_activity_flag"] == "high").sum()),
+            "reported_days": int(len(hotsync_events)),
+            "events_file": "hotsync_activity_anomalies.csv",
+        },
         "caveat": ("An episode is a statistical candidate: a z-score does not prove that an event is scientifically "
                    "exceptional (see `robustness` and anomaly_validation.json). 'low' flags can be satellite or "
                    "ground-segment outages, not less fire; days that look like partial outages are excluded. A single "

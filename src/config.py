@@ -114,4 +114,11 @@ ANOM_DETREND = os.getenv("PYRO_ANOM_DETREND", "0") == "1"
 ANOM_REPLICATES = int(os.getenv("PYRO_ANOM_REPLICATES", 30))   # random-thinning replicates per scenario
 ANOM_NULL_SIMS = int(os.getenv("PYRO_ANOM_NULL_SIMS", 2000))   # Monte-Carlo records for the false-alarm null
 
+# --- HotSync-style active-cell anomaly score (runs beside the robust FRP detector) ---
+HOTSYNC_ANOM_Z = float(os.getenv("PYRO_HOTSYNC_ANOM_Z", 2.5))
+HOTSYNC_ANOM_WINDOW_DAYS = int(os.getenv("PYRO_HOTSYNC_ANOM_WINDOW", 7))
+HOTSYNC_ANOM_MIN_POOL = int(os.getenv("PYRO_HOTSYNC_ANOM_MIN_POOL", 10))
+HOTSYNC_ANOM_MIN_ACTIVITY = float(os.getenv("PYRO_HOTSYNC_ANOM_MIN_ACTIVITY", 5))
+HOTSYNC_ANOM_MIN_OVERLAP_DAYS = int(os.getenv("PYRO_HOTSYNC_ANOM_MIN_OVERLAP_DAYS", 30))
+
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)

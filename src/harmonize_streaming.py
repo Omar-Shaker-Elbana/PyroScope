@@ -65,7 +65,7 @@ def _stage_csv(conn: sqlite3.Connection, table: str, path: Path) -> int:
         ts = ts.loc[ok]
         if chunk.empty:
             continue
-        chunk["ts_ns"] = ts.astype("int64").to_numpy()
+        chunk["ts_ns"] = ts.dt.as_unit("ns").astype("int64").to_numpy()
         chunk["date"] = ts.dt.strftime("%Y-%m-%d").to_numpy()
         for col in ("latitude", "longitude", "frp", "scan", "track", "brightness", "bright_ti4"):
             chunk[col] = pd.to_numeric(chunk[col], errors="coerce")
