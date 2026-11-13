@@ -1,38 +1,71 @@
 
+# ==========================================
 # Python
+# ==========================================
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
 .venv/
 venv/
+env/
 
+# ==========================================
 # IDE and OS
+# ==========================================
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+*.swp
 
-# Environment and secrets
+# ==========================================
+# Secrets and local configuration
+# ==========================================
 .env
 .env.*
 !.env.example
 settings.ps1
 settings.json
 
+# ==========================================
 # Raw satellite datasets
-data/raw/*
+# ==========================================
+data/raw/
 !data/raw/.gitkeep
 
-# Generated data (ignored by default)
-data/processed/*
+# ==========================================
+# Generated processed datasets
+# ==========================================
+data/processed/
 !data/processed/.gitkeep
-!data/processed/*.png
+
+# Keep only intentionally useful summary artifacts
 !data/processed/frp_mapping.json
 !data/processed/anomaly_report.json
 
-# Alternative generated directories
+# Alternative generated datasets
 data/processed_*/
+!data/processed_*/.gitkeep
 
-.patch
-.txt
-/data
+# ==========================================
+# Generated temporary files
+# ==========================================
+*.patch
+*.log
+*.tmp
+*.part
+*.bak
+
+# ==========================================
+# Local caches and temporary exports
+# ==========================================
+.cache/
+.temp/
+tmp/
