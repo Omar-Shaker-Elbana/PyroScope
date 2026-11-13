@@ -107,6 +107,73 @@ matched pixels are static sources (flares, industry; 36 % of the FRP) at only 11
 759 distinct 0.01-degree sites, so the effective sample is much smaller than 1,864, which is what the clustered
 bootstrap accounts for.
 
+### 1.5 k as a function of fire size, day/night and time gap (`src/kmodel.py`)
+
+Section 1.4 shows that a constant k moves with fire size, day/night and the allowed time gap, but it varies one factor at
+a time, and the factors are confounded (night-time pixels are smaller, so "night" partly measures "small"). The model
+fits them jointly:
+
+    VIIRS FRP in the footprint = MODIS FRP * k,    log k = a + s * log(MODIS FRP / f_ref) + c * night + d * dt_hours
+
+* **Estimator.** Quasi-Poisson regression with a log link and `log(MODIS FRP)` as offset, fitted by IRLS, confidence
+  intervals from the same 0.5-degree-cell cluster bootstrap as the constant k (2,000 replicates). It targets the
+  conditional *mean*, which is what the calendar sums, so no retransformation correction is needed (a regression of
+  `log(VIIRS)` on `log(MODIS)` targets the median pixel). With no covariate it equals `sum(VIIRS) / sum(MODIS)`, the
+  constant k, and in-sample the fitted total equals the observed total exactly (both are tested in `selftest.py`).
+  The log-log regression is reported as a cross-check (`log_log_ols`): its elasticity of 0.82 (CI 0.74-0.90) agrees with
+  `1 + s = 0.86`.
+* **Which terms are kept is decided by prediction, not by p-values.** All 8 subsets of {size, night, dt} are scored by the
+  held-out Poisson deviance with whole cells held out (10 folds); the simplest subset within one paired standard error
+  of the best is kept (`k_model.cv.candidates` has every score).
+
+| terms | CV deviance | vs best (SE) | held-out total, predicted / observed |
+|---|---|---|---|
+| **size** | **22,503** | best | 1.001 |
+| size + dt | 22,580 | +77 (140) | 1.001 |
+| size + night | 22,648 | +145 (76) | 1.009 |
+| size + night + dt | 22,686 | +184 (160) | 1.008 |
+| dt / night + dt / night | 23,174 / 23,191 / 23,215 | +671 / +688 / +712 | 0.995 / 1.006 / 1.007 |
+| none (constant k) | 23,227 | +724 (492) | 0.993 |
+
+* **Result (Aqua x S-NPP, 1,864 pixels, 101 cells).** Only fire size is selected. Coefficient of log FRP -0.138
+  (95 % CI -0.218 to -0.073): k changes by -27 % (CI -40 % to -15 %) for every 10x increase in MODIS FRP. In the model
+  with all three terms, night is -0.09 (CI -0.26 to +0.12) and time gap +0.36 per hour (CI -0.28 to +1.10): neither can
+  be told from zero, i.e. the day/night difference of section 1.4 (0.772 vs 0.887) is largely fire size, and the time-gap
+  effect is not identified by pairs that are all within 30 minutes. Held-out deviance is 3.1 % below the constant k
+  (3.8 % under leave-one-year-out).
+* **What changes, out of fold, by quintile of MODIS FRP** (observed / predicted total):
+
+| MODIS FRP (MW) | 3.6-7.6 | 7.7-9.9 | 10.0-13.2 | 13.3-20.7 | 20.8-1078 |
+|---|---|---|---|---|---|
+| constant k = 0.821 | 1.22 | 1.11 | 1.07 | 1.09 | 0.93 |
+| size model | 0.95 | 0.90 | 0.90 | 0.97 | 1.07 |
+
+  The constant k under-predicts the smallest pixels by 22 % and over-predicts the largest by 7 %; the model cuts the
+  worst bias to 10 %. It does **not** remove it: the middle bins stay ~10 % too high, a curvature the log-linear form
+  does not capture. A quadratic term was tried: it lowers the held-out deviance by 1.4 % (1.2 standard errors), is not
+  kept by the one-standard-error rule and is worse for the smallest pixels, so it is not used.
+* **Applied at dt = 0.** The VIIRS-equivalent FRP is what VIIRS would have seen at the MODIS overpass; a MODIS pixel with no
+  VIIRS pixel has no gap of its own. Fire size is clipped to the central 99.8 % of the fitted pixels (4.2-731 MW here)
+  and the ratio is held at the boundary beyond that, because a log-linear trend is not trusted outside the data.
+  Unknown day/night uses the fitted night share. Winsorising the size covariate steepens a perfectly log-linear
+  slope slightly (simulation, true slope -0.300: estimated -0.3004 unclipped, -0.3019 at the default 0.1 % per tail,
+  -0.3067 at 0.5 %), the price of not extrapolating from a few very large fires.
+* **Interval.** `modis_frp_viirs_equiv_lo_mw` / `_hi_mw` keep the *relative* width of the constant-k prediction interval
+  (sampling error of the aggregate scale and between-year tau, 0.65-1.03 around 0.82). Uncertainty of the size slope is
+  in `k_model.coefficients_*` and the band of `k_model.png`, but it is not added to the interval: it mostly cancels in
+  daily totals, which this work did not verify.
+* **Effect on the calendar.** The 11-year sum of `modis_frp_viirs_equiv_mw` falls by 1.0 %; the applied aggregate scale
+  is 0.813 (constant 0.821). Individual days move more, in either direction, depending on the size mix.
+  The anomaly series (VIIRS only), `k`, its CI and `k_trust` are unchanged; `PYRO_K_MODEL=0` reproduces the previous
+  outputs exactly.
+* **Validated on known answers (`selftest.py`).** Constant truth: nothing is adopted. Planted truth (size exponent 0.7,
+  night x 0.75, gap decay 0.8 per hour): the three coefficients are recovered (-0.295 / -0.289 / -0.69 against
+  -0.300 / -0.288 / -0.80, CIs cover), all three terms are selected and the out-of-fold bias by size bin falls from 75 % to
+  2 %. Over 24 random seeds the 95 % intervals covered the planted values 92-96 % of the time.
+* **Not done.** The model is conditional on a MODIS detection like the constant k, fitted on Egypt only (59 % of the
+  pixels are static sources at ~117 locations; holding out whole cells limits, but cannot remove, the advantage of having
+  seen those sites), and it says nothing about the diurnal cycle: Terra, ~150 minutes from S-NPP, still gets no scale.
+
 ---
 
 ## 2. Observation status: a day without observations is not a day without fire
@@ -283,9 +350,12 @@ metrics move smoothly with the size.
 
 ## 5. Known limits that this work does not remove
 
-* k is conditional on a MODIS detection, depends on fire size (section 1.4) and has not been tested outside Egypt.
+* k is conditional on a MODIS detection, depends on fire size (sections 1.4 and 1.5: the applied scale models this, the
+  headline constant does not; ~10 % residual bias remains in mid-sized pixels) and has not been tested outside Egypt.
 * Terra and any satellite without close-in-time matches with the reference cannot be harmonized by this method. A route
   that does not need close overpasses (e.g. through a third satellite or the polar overlaps of Terra and Aqua) is open.
+  A diurnal-cycle correction is not implemented: Terra and Aqua each sit at one gap to S-NPP, so the shape of the
+  FRP-versus-time-of-day curve is not identifiable from these pairs and would have to come from an independent source.
 * Aqua's orbit drifts from ~13.2 h to ~14.4 h local time after 2022, so close matches become rarer; 2025 has too few pixels
   for a yearly k.
 * The anomaly baseline mixes years of different activity (section 3.2). Episodes remain statistical candidates;

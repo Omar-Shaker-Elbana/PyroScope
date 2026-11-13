@@ -7,7 +7,7 @@
                               sizes, site, day, month). Justifies the unit used for the headline CI.
  - grid_sensitivity         : what the 0.5 deg aggregation grid changes and what it does not (point estimate of k and
                               daily FRP totals: nothing; active-cell ratios, cell-level correlations, the CI: yes).
- - plots and NaN-safe JSON helpers.
+ - plots and NaN-safe JSON helpers (plot_k_model draws the conditional scale of kmodel.py against the constant k).
 
 Deliberately free of any import from harmonize.py (harmonize.py imports this module).
 """
@@ -271,6 +271,45 @@ def plot_k_by_year(info, sat, path):
     ax.set_title(f"MODIS {sat} x S-NPP: k by year\n{sub}")
     ax.set_ylabel("k (VIIRS-equivalent FRP / MODIS FRP)")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def plot_k_model(info, sat, path):
+    """k against MODIS FRP: the out-of-fold ratio of sums per fire-size bin (what the data say), the constant k, and the
+    selected conditional model with its cluster-bootstrap band. Drawn from `info["k_model"]` alone."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    km = info.get("k_model") or {}
+    bins = km.get("bias_by_frp_bin") or []
+    if not bins:
+        return
+    BLUE, ORANGE, GREY = "#2a78d6", "#eb6834", "#8a8a85"
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.array([b["mean_frp"] for b in bins])
+    ax.plot(x, [b["observed_ratio"] for b in bins], "o", color="#33322f", ms=7, zorder=3,
+            label="observed VIIRS / MODIS FRP in each fire-size bin")
+    for b in bins:
+        ax.hlines(b["observed_ratio"], b["frp_min"], b["frp_max"], color="#33322f", lw=1, alpha=0.5)
+    ax.axhline(info["k"], color=ORANGE, lw=1.8, label=f"constant k = {info['k']:.3f}")
+    if km.get("adopted") and km.get("curve"):
+        c = km["curve"]
+        f = np.array([r["frp"] for r in c])
+        ax.fill_between(f, [r["k_lo"] for r in c], [r["k_hi"] for r in c], color=BLUE, alpha=0.18, label="95% band (cell bootstrap)")
+        ax.plot(f, [r["k"] for r in c], color=BLUE, lw=2, label="conditional k(MODIS FRP), dt = 0")
+        e = km.get("size_effect")
+        sub = (f"k changes {e['k_change_per_10x_modis_frp']:+.0%} per 10x MODIS FRP "
+               f"(95% CI {e['ci95'][0]:+.0%} to {e['ci95'][1]:+.0%}); held-out deviance "
+               f"{km['cv_improvement_over_constant_k']['deviance_reduction']:.1%} lower") if e else km["reason"]
+    else:
+        sub = "constant k kept: " + km.get("reason", "")
+    ax.set_xscale("log")
+    ax.set_xlabel(f"MODIS {sat} pixel FRP (MW, log scale)")
+    ax.set_ylabel("k (VIIRS-equivalent FRP / MODIS FRP)")
+    ax.set_title(f"MODIS {sat} x S-NPP: does k depend on fire size?\n{sub}", fontsize=10)
+    ax.grid(True, alpha=0.3, which="both"); ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

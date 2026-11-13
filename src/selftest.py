@@ -8,7 +8,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from src import anomaly, anomaly_validation, harmonize, harmonize_validation as hv, kstats
+from src import anomaly, anomaly_validation, harmonize, harmonize_validation as hv, kmodel, kstats
 from src.harmonize import add_features, match_pair, fit_scale
 
 TRUE_K = 1.6          # VIIRS-equivalent FRP = TRUE_K x MODIS FRP
@@ -19,12 +19,19 @@ YEARS = (2015, 2016, 2017, 2018)
 VIIRS_LEADS_MIN = 5.0  # S-NPP passes this many minutes before Aqua
 
 
-def synthetic_overpasses(seed=1, year_k=None):
-    """Aqua pixels + the S-NPP pixels inside their footprints (+ VIIRS-only clutter). year_k: {year: true k}."""
+def synthetic_overpasses(seed=1, year_k=None, size_exp=1.0, night_factor=1.0, dt_decay=0.0):
+    """Aqua pixels + the S-NPP pixels inside their footprints (+ VIIRS-only clutter). year_k: {year: true k}.
+    Planted dependences of the true ratio (defaults = none, and then the random stream is exactly the old one):
+      size_exp     ratio ~ (FRP / 40) ** (size_exp - 1)
+      night_factor ratio x night_factor on night-time fires (half of the fires, drawn from a separate generator)
+      dt_decay     ratio x exp(-dt_decay * gap_hours), gap drawn uniformly from 4-26 min (else a fixed ~5 min lead)"""
     rng = np.random.default_rng(seed)
+    rng_x = np.random.default_rng(seed + 12345)        # day/night and time-gap draws never touch the main stream
     mrows, vrows = [], []
     for year in YEARS:
         kk = TRUE_K if year_k is None else year_k[year]
+        is_night = rng_x.random(FIRES_PER_YEAR) < 0.5
+        gaps = rng_x.uniform(4, 26, FIRES_PER_YEAR) if dt_decay else np.full(FIRES_PER_YEAR, VIIRS_LEADS_MIN)
         days = rng.integers(0, 365, FIRES_PER_YEAR)
         t0 = pd.Timestamp(f"{year}-01-01 13:30", tz="UTC") + pd.to_timedelta(
             days * 1440 + rng.uniform(-8, 8, FIRES_PER_YEAR), unit="m")
@@ -33,15 +40,18 @@ def synthetic_overpasses(seed=1, year_k=None):
         frp_m = np.exp(rng.normal(np.log(40), 0.9, FIRES_PER_YEAR))
         for i in range(FIRES_PER_YEAR):
             mrows.append(dict(sensor_family="MODIS", source_satellite="Aqua", latitude=lat[i],
-                              longitude=lon[i], acq_datetime_utc=t0[i], frp=frp_m[i], scan=1.2, track=1.1))
+                              longitude=lon[i], acq_datetime_utc=t0[i], frp=frp_m[i], scan=1.2, track=1.1,
+                              daynight="N" if is_night[i] else "D"))
             n = int(rng.integers(2, 7))
-            share = rng.dirichlet(np.ones(n)) * frp_m[i] * kk * np.exp(rng.normal(0, NOISE))
+            extra = (frp_m[i] / 40.0) ** (size_exp - 1.0) * (night_factor if is_night[i] else 1.0) \
+                * np.exp(-dt_decay * gaps[i] / 60.0)
+            share = rng.dirichlet(np.ones(n)) * frp_m[i] * kk * extra * np.exp(rng.normal(0, NOISE))
             for j in range(n):
                 vrows.append(dict(
                     sensor_family="VIIRS", source_satellite="S-NPP",
                     latitude=lat[i] + rng.uniform(-0.3, 0.3) / 111.2,
                     longitude=lon[i] + rng.uniform(-0.3, 0.3) / (111.2 * np.cos(np.radians(lat[i]))),
-                    acq_datetime_utc=t0[i] - pd.Timedelta(minutes=VIIRS_LEADS_MIN + rng.uniform(-2, 2)),
+                    acq_datetime_utc=t0[i] - pd.Timedelta(minutes=gaps[i] + rng.uniform(-2, 2)),
                     frp=share[j], scan=0.4, track=0.4))
     planted = len(vrows)
     for _ in range(1500):   # VIIRS-only clutter far from every MODIS detection
@@ -106,6 +116,109 @@ def check_scale():
         harmonize.APPLY_UNVALIDATED_K = False
     assert basis2["Terra"] == "own_low_trust" and "Terra" in scale2, "opt-in must apply AND label the unvalidated scale"
     return pairs, M, V
+
+
+def _fit_arrays(pairs):
+    use = harmonize._usable(pairs)
+    use = use[use["abs_dt_min"] <= harmonize.K_FIT_MAX_DT_MIN]
+    return (use, use["frp"].to_numpy(float), use["viirs_frp_sum"].to_numpy(float),
+            kmodel.night_flag(use["daynight"]), use["abs_dt_min"].to_numpy(float))
+
+
+def check_k_model():
+    """k as a function of covariates (kmodel.py): nests the constant k, recovers planted effects, does not invent
+    effects that are not there, never extrapolates, and is applied (and only applied) where it was fitted."""
+    # 1. the estimator nests the constant k and preserves totals exactly
+    M, V, _ = synthetic_overpasses()
+    pairs = match_pair(add_features(M), add_features(V), 180)
+    use, frp, y, night, dt = _fit_arrays(pairs)
+    spec = kmodel.make_spec(frp, night, 0.005)
+    beta, ok = kmodel._fit(spec, (), frp, y, night, dt)
+    assert ok and np.isclose(np.exp(beta[0]), y.sum() / frp.sum(), rtol=1e-9), "intercept-only model must equal the ratio of sums"
+    beta, ok = kmodel._fit(spec, kmodel.TERMS, frp, y, night, dt)
+    mu = kmodel._mu(spec, kmodel.TERMS, beta, frp, night, dt)
+    assert ok and abs(mu.sum() / y.sum() - 1) < 1e-9, "fitted totals must equal observed totals"
+
+    # 2. placebo: the true k is constant, so no covariate may be adopted and the constant k must stay
+    k, info = fit_scale(pairs, "Aqua")
+    km = info["k_model"]
+    print(f"placebo (constant truth): adopted = {km['adopted']}, selected {km['cv']['selected_subset']}")
+    assert km["available"] and not km["adopted"] and km["model"] is None, "an effect that is not there must not be adopted"
+    scale, basis = harmonize.decide_scales({"Aqua": (k, info)})
+    assert basis["Aqua"] == "own" and "model" not in scale["Aqua"]
+    assert all(c["terms"] != [] or c["delta_vs_best"] >= 0 for c in km["cv"]["candidates"])
+
+    # 3. planted dependence on size, day/night and time gap is recovered, adopted and worth it
+    truth = {"log_frp": -0.3, "night": float(np.log(0.75)), "dt_hours": -0.8}
+    # seed 11: a typical draw. Across 24 seeds the cluster-bootstrap 95% CIs of the three coefficients covered the truth
+    # 92-96 % of the time (mean size estimate -0.305, sd 0.010), so any single seed can still miss by chance.
+    M2, V2, _ = synthetic_overpasses(seed=11, size_exp=0.7, night_factor=0.75, dt_decay=0.8)
+    pairs2 = match_pair(add_features(M2), add_features(V2), 180)
+    k2, info2 = fit_scale(pairs2, "Aqua")
+    km2 = info2["k_model"]
+    c = km2["coefficients_all_terms"]
+    print("planted effects: " + ", ".join(f"{n} {c[n]['coef']:+.3f} (true {t:+.3f}, CI {c[n]['ci95'][0]:+.2f}..{c[n]['ci95'][1]:+.2f})"
+                                          for n, t in truth.items()))
+    for n, t in truth.items():
+        assert c[n]["ci95"][0] <= t <= c[n]["ci95"][1], f"95% CI of {n} misses the planted value {t}"
+    assert abs(c["log_frp"]["coef"] - truth["log_frp"]) < 0.05 and abs(c["night"]["coef"] - truth["night"]) < 0.05
+    assert km2["adopted"] and km2["cv"]["selected_subset"] == ["size", "night", "dt"], km2["cv"]["selected_subset"]
+    assert km2["cv_improvement_over_constant_k"]["deviance_reduction"] > 0.05, "planted effects must pay off out of sample"
+    worst_const = max(abs(b["observed_over_constant_k"] - 1) for b in km2["bias_by_frp_bin"])
+    worst_model = max(abs(b["observed_over_selected_model"] - 1) for b in km2["bias_by_frp_bin"])
+    print(f"out-of-fold bias by fire-size bin: constant k up to {worst_const:.0%}, model up to {worst_model:.0%}")
+    assert worst_const > 0.15 and worst_model < 0.08, "the model must remove the size-dependent bias of the constant k"
+    assert abs(km2["in_sample_total_pred_over_obs"] - 1) < 1e-9
+    assert km2["size_effect"]["ci95"][0] < km2["size_effect"]["k_change_per_10x_modis_frp"] < km2["size_effect"]["ci95"][1]
+    # the log-log regression of the brief agrees: elasticity = 1 + size coefficient
+    assert abs(km2["log_log_ols"]["coef"]["log_frp"]["coef"] - (1 + truth["log_frp"])) < 0.05
+
+    # 4. evaluation: no extrapolation, dt = 0 reference, unknown day/night
+    mod = km2["model"]
+    hi = mod["frp_clip"][1]
+    r = kmodel.predict_ratio(mod, [hi, 10 * hi, 1e6], night=np.zeros(3))
+    assert np.allclose(r, r[0]), "above the clip the ratio must be held, not extrapolated"
+    r_d = kmodel.predict_ratio(mod, [40.0], night=np.array([0.0]))[0]
+    r_n = kmodel.predict_ratio(mod, [40.0], night=np.array([1.0]))[0]
+    r_u = kmodel.predict_ratio(mod, [40.0], night=np.array([np.nan]))[0]
+    assert abs(r_n / r_d - 0.75) < 0.05 and r_n < r_u < r_d, "unknown day/night must fall between day and night"
+    r_gap = kmodel.predict_ratio(mod, [40.0], night=np.array([0.0]), dt_min=np.array([30.0]))[0]
+    assert abs(r_gap / r_d - np.exp(-0.8 * 0.5)) < 0.1, "a 30 min gap must lower the ratio as planted; the default is dt = 0"
+
+    # 5. application: conditional for the satellite it was fitted on, NaN for Terra, constants only when transferred
+    fits = {"Aqua": (k2, info2), "Terra": (None, {"modis_satellite": "Terra", "k": None, "n_pairs": 0})}
+    scale, basis = harmonize.decide_scales(fits)
+    assert basis["Aqua"] == "own_conditional" and "model" in scale["Aqua"] and basis["Terra"] == "none"
+    both = pd.concat([add_features(M2), add_features(M2).assign(source_satellite="Terra")], ignore_index=True)
+    eq = harmonize.apply_scale(both, scale, basis)
+    a = eq["source_satellite"] == "Aqua"
+    exp_r = kmodel.predict_ratio(mod, eq.loc[a, "frp"].to_numpy(), kmodel.night_flag(eq.loc[a, "daynight"]))
+    assert np.allclose(eq.loc[a, "frp_equiv"], eq.loc[a, "frp"] * exp_r) and eq.loc[~a, "frp_equiv"].isna().all()
+    band = scale["Aqua"]["k_hi"] / scale["Aqua"]["k"]
+    assert np.allclose(eq.loc[a, "frp_equiv_hi"], eq.loc[a, "frp_equiv"] * band), "interval keeps its relative width"
+    eff = harmonize.applied_scale(eq, scale)
+    assert eff["Terra"] is None and eff["Aqua"] > 0
+    harmonize.APPLY_UNVALIDATED_K = True
+    try:
+        scale3, basis3 = harmonize.decide_scales(fits)
+    finally:
+        harmonize.APPLY_UNVALIDATED_K = False
+    assert basis3["Terra"] == "transferred:Aqua" and "model" not in scale3["Terra"], "a conditional model is never transferred"
+
+    # 6. switch-off and degenerate inputs
+    harmonize.K_MODEL = False
+    try:
+        k_off, info_off = fit_scale(pairs2, "Aqua")
+    finally:
+        harmonize.K_MODEL = True
+    assert not info_off["k_model"]["available"] and k_off == k2 and \
+        harmonize.decide_scales({"Aqua": (k_off, info_off)})[1]["Aqua"] == "own", "PYRO_K_MODEL=0 keeps the constant k"
+    allday = use.assign(daynight="D")
+    km_d = kmodel.fit_k_model(allday, np.random.default_rng(1), n_boot=50)
+    assert "night" in km_d["terms_not_estimable"] and km_d["available"], "a constant day/night column cannot be estimated"
+    km_s = kmodel.fit_k_model(use[use["cell_id"].isin(use["cell_id"].unique()[:3])], np.random.default_rng(1), n_boot=50)
+    assert not km_s["available"] and not km_s["adopted"], "too few cells to cross-validate: no model"
+    print("k model: nests the constant k, recovers planted effects, rejects placebo, clips, labels, switches off")
 
 
 def check_heterogeneity():
@@ -358,6 +471,7 @@ def main():
     check_stats_helpers()
     pairs, M, V = check_scale()
     check_heterogeneity()
+    check_k_model()
     check_calendar(M, V)
     check_grid(M, V)
     check_anomalies()
