@@ -280,8 +280,9 @@ def check_stats_helpers():
 
 
 # --------------------------------------------------------------------------- B. calendar status
-def _calendar_case(n_viirs):
-    """12 days, VIIRS with `n_viirs` detections a day except on a gap day (not observed) and a zero day (observed, empty)."""
+def _calendar_case(n_viirs, clear=None, **cloud_kw):
+    """12 days, VIIRS with `n_viirs` detections a day except on a gap day (not observed) and a zero day (observed, empty).
+    clear / cloud_kw: optional cloud information passed to build_calendar (None = the calendar as it was without it)."""
     t0, t1 = pd.Timestamp("2016-03-01 00:00", tz="UTC"), pd.Timestamp("2016-03-12 23:59", tz="UTC")
     rng = np.random.default_rng(5)
     days = pd.date_range("2016-03-01", "2016-03-12", freq="D", tz="UTC")
@@ -308,7 +309,7 @@ def _calendar_case(n_viirs):
     m, v = harmonize.apply_scale(m, scale, basis), harmonize.apply_scale(v, scale, basis)
     all_days = pd.date_range("2016-03-01", "2016-03-12", freq="D")
     observed = {"viirs": set(all_days) - {gap_day}, "Aqua": set(all_days), "Terra": set(all_days)}   # gap_day: NOT observed
-    cal, cells = harmonize.build_calendar(m, v, "S-NPP", t0, t1, observed, basis)
+    cal, cells = harmonize.build_calendar(m, v, "S-NPP", t0, t1, observed, basis, clear, **cloud_kw)
     return cal.set_index("date"), cells, (m, v, t0, t1, observed, basis), gap_day, zero_day
 
 
@@ -346,6 +347,154 @@ def check_calendar(M, V):
     assert set(np.flatnonzero(low)) == {40, 81}, "80 -> 6 (any passes) and a one-pass 80 -> 30 day are outage-suspect"
     sparse = pd.Series(np.r_[np.full(40, 2.0), 0.0, np.full(40, 2.0)])
     assert not harmonize.flag_low_coverage(sparse, pd.Series(np.zeros(81)))[0].any(), "sparse series: no inference"
+
+
+# --------------------------------------------------------------------------- B2. cloud obscuration
+def _rejected(path):
+    """Message of the SystemExit that cloud_mask.read_table raises for a bad file."""
+    from src import cloud_mask
+    try:
+        cloud_mask.read_table(path)
+    except SystemExit as e:
+        return str(e)
+    raise AssertionError(f"{path} should have been rejected")
+
+
+def check_cloud():
+    """Third observation status, 'observed, obscured': an empty day under cloud is not a confirmed zero."""
+    import tempfile
+    from pathlib import Path
+    from src import cloud_mask
+
+    # 1. MOD35 Cloud_Mask byte 0: bit 0 = determined, bits 1-2 = 0 cloudy / 1 uncertain / 2 probably clear / 3 clear;
+    #    the other bits (day/night, glint, snow, land/water) must not matter
+    b = np.array([0b111, 0b101, 0b011, 0b001, 0b110, 0b000, 0b11001111, 0b00001001])
+    assert np.isclose(cloud_mask.clear_share_from_mod35(b), 3 / 8), "clear + probably clear (determined only)"
+    assert np.isclose(cloud_mask.clear_share_from_mod35(b, probably_clear=False), 2 / 8)
+    area = np.array([True] * 6 + [False] * 2)
+    assert np.isclose(cloud_mask.clear_share_from_mod35(b, area), 2 / 6), "only pixels inside the area count"
+    assert np.isnan(cloud_mask.clear_share_from_mod35(b, np.zeros(8, bool))), "an area without pixels has no clear share"
+    for bad in (lambda: cloud_mask.clear_share_from_mod35([300]), lambda: cloud_mask.clear_share_from_mod35(b, area[:3])):
+        try:
+            bad()
+            raise AssertionError("invalid cloud-mask input accepted")
+        except ValueError:
+            pass
+
+    # 2. the daily table: columns, units, satellite selection, unknown days, bad files
+    days = pd.date_range("2016-03-01", "2016-03-06", freq="D")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+
+        def write(name, text):
+            (tmp / name).write_bytes(text.encode("utf-8"))
+            return tmp / name
+
+        # Excel-style file: BOM, CRLF, capitalised headers, a timestamp, two rows for one day, an empty value
+        p = write("excel.csv", "﻿Date,Cloud_Fraction\r\n2016-03-02,0.8\r\n2016-03-02,0.6\r\n2016-03-03,\r\n"
+                               "2016-03-04 11:30:00,0.1\r\n")
+        s, info = cloud_mask.clear_series(cloud_mask.read_table(p), "S-NPP", days)
+        assert np.isclose(s[pd.Timestamp("2016-03-02")], 0.3), "cloud 0.8 and 0.6 -> clear 0.2 and 0.4 -> mean 0.3"
+        assert np.isclose(s[pd.Timestamp("2016-03-04")], 0.9), "a timestamp is floored to its UTC day"
+        assert s[[pd.Timestamp("2016-03-01"), pd.Timestamp("2016-03-03")]].isna().all(), "absent / empty = unknown, not clear"
+        assert info["days_with_cloud_info"] == 2 and info["days_without_cloud_info"] == 4 and not info["problems"]
+        for col, val in (("clear_percent", "80"), ("cloud_percent", "20")):
+            s, _ = cloud_mask.clear_series(cloud_mask.read_table(write(f"{col}.csv", f"date,{col}\n2016-03-02,{val}\n")), "S-NPP", days)
+            assert np.isclose(s[pd.Timestamp("2016-03-02")], 0.8), col
+        sat = cloud_mask.read_table(write("sat.csv", "date,clear_fraction,satellite\n2016-03-02,0.9,S-NPP\n2016-03-02,0.1,Aqua\n"
+                                                    "2016-03-03,0.2,aqua\n2016-03-04,0.4,\n"))
+        s, info = cloud_mask.clear_series(sat, "S-NPP", days)
+        assert s.notna().sum() == 1 and np.isclose(s[pd.Timestamp("2016-03-02")], 0.9), \
+            "a satellite with rows of its own uses only those (not Aqua's, not the rows without a satellite)"
+        s, _ = cloud_mask.clear_series(sat, "Aqua", days)
+        assert np.isclose(s[pd.Timestamp("2016-03-02")], 0.1) and np.isclose(s[pd.Timestamp("2016-03-03")], 0.2), "case-insensitive"
+        s, info = cloud_mask.clear_series(sat, "NOAA-20", days)
+        assert s.notna().sum() == 1 and np.isclose(s[pd.Timestamp("2016-03-04")], 0.4) and info["rows_used"] == "rows without a satellite"
+        only_aqua = cloud_mask.read_table(write("aqua.csv", "date,clear_fraction,satellite\n2016-03-02,0.1,Aqua\n"))
+        s, info = cloud_mask.clear_series(only_aqua, "S-NPP", days)
+        assert s.isna().all() and info["problems"], "no usable rows for the reference satellite: nothing applied, and said so"
+        s, info = cloud_mask.clear_series(cloud_mask.read_table(write("late.csv", "date,clear_fraction\n2030-01-01,0.5\n")), "S-NPP", days)
+        assert s.isna().all() and info["problems"], "a file outside the window is reported, not silently applied"
+        assert "between 0 and 1" in _rejected(write("pct_in_fraction.csv", "date,clear_fraction\n2016-03-02,80\n")), \
+            "a percentage in a fraction column is rejected, not guessed"
+        for name, text in (("neg.csv", "date,cloud_fraction\n2016-03-02,-0.2\n"), ("pct150.csv", "date,clear_percent\n2016-03-02,150\n"),
+                           ("text.csv", "date,clear_fraction\n2016-03-02,abc\n"), ("nodate.csv", "day,clear_fraction\n2016-03-02,0.5\n"),
+                           ("noval.csv", "date,something\n2016-03-02,0.5\n"), ("baddate.csv", "date,clear_fraction\nsoon,0.5\n"),
+                           ("empty.csv", "date,clear_fraction\n2016-03-02,\n"), ("blank.csv", "")):
+            _rejected(write(name, text))
+        _rejected(tmp / "does_not_exist.csv")
+
+    # 3. the calendar: obscured = observed + empty + too little clear sky; everything else keeps its old meaning
+    cdays = pd.date_range("2016-03-01", "2016-03-12", freq="D")
+
+    def clr(over=None, base=0.9):
+        c = pd.Series(base, index=cdays)
+        for d, x in (over or {}).items():
+            c[pd.Timestamp(d)] = x
+        return c
+
+    cloudy = {"2016-03-08": 0.2, "2016-03-05": 0.1, "2016-03-03": 0.1, "2016-03-10": np.nan}   # zero day, gap day, a day WITH detections, unknown
+    cal, _, _, gap_day, zero_day = _calendar_case(3, clr(cloudy))
+    z, g, n, u = cal.loc[zero_day], cal.loc[gap_day], cal.loc["2016-03-03"], cal.loc["2016-03-10"]
+    print(f"cloudy empty day -> {z['harmonized_status']}, cloudy day with detections -> {n['harmonized_status']}, "
+          f"unknown cloud -> {u['harmonized_status']}")
+    assert z["harmonized_status"] == "observed_obscured" and np.isnan(z["harmonized_frp_mw_viirs_equiv"]), "not a confirmed zero"
+    assert not bool(z["harmonized_is_measured"]) and z["harmonized_source"] == "none"
+    assert z["viirs_detections"] == 0 and np.isclose(z["viirs_clear_fraction"], 0.2) and bool(z["viirs_cloud_limited"]), \
+        "the sensor WAS observed: its own numbers stay 0, not NaN"
+    assert g["harmonized_status"] == "viirs_not_observed" and not bool(g["viirs_cloud_limited"]), "a gap stays a gap"
+    assert n["harmonized_status"] == "measured" and n["harmonized_frp_mw_viirs_equiv"] == n["viirs_frp_mw"] and bool(n["viirs_cloud_limited"]), \
+        "detections are real: kept and flagged by default"
+    assert u["harmonized_status"] == "measured" and np.isnan(u["viirs_clear_fraction"]) and not bool(u["viirs_cloud_limited"]), \
+        "unknown cloud cover is neither clear nor cloudy"
+    assert not bool(cal.loc["2016-03-04", "viirs_cloud_limited"])
+    summ = harmonize.cloud_summary(cal.reset_index(), {}, 0.5, False)
+    assert (summ["days_cloud_limited"], summ["days_marked_observed_obscured"], summ["cloud_limited_days_with_detections_kept"]) == (2, 1, 1)
+    assert "observed_obscured" in cloud_mask.describe(dict(summ, calendar_days=12, days_with_cloud_info=11, days_without_cloud_info=1,
+                                                           rows_used="x"))
+    for label, c in (("clear sky", clr()), ("unknown everywhere", clr(base=np.nan)), ("exactly at the threshold", clr({zero_day: 0.5}))):
+        zc = _calendar_case(3, c)[0].loc[zero_day]
+        assert zc["harmonized_status"] == "measured_zero" and zc["harmonized_frp_mw_viirs_equiv"] == 0.0, f"{label}: a confirmed zero"
+    assert _calendar_case(3, clr(cloudy), min_clear=0.15)[0].loc[zero_day, "harmonized_status"] == "measured_zero", "threshold 0.15 < clear 0.2"
+    nz = _calendar_case(3, clr(cloudy), obscure_nonzero=True)[0].loc["2016-03-03"]
+    assert nz["harmonized_status"] == "observed_obscured" and np.isnan(nz["harmonized_frp_mw_viirs_equiv"]) and nz["viirs_frp_mw"] > 0, \
+        "PYRO_CLOUD_OBSCURE_NONZERO: harmonized value NaN, the sensor's own FRP stays in the calendar"
+    dense_cloudy = _calendar_case(40, clr(cloudy))[0].loc[zero_day]
+    dense_clear = _calendar_case(40, clr())[0].loc[zero_day]
+    assert dense_cloudy["harmonized_status"] == "observed_obscured" and dense_clear["harmonized_status"] == "measured_low_coverage", \
+        "dense series: cloud explains the empty day; on a clear day it is still an outage suspect"
+    base = _calendar_case(3)[0]
+    same = _calendar_case(3, clr(base=1.0))[0]
+    extra = ["viirs_clear_fraction", "viirs_cloud_limited"]
+    assert not set(extra) & set(base.columns) and set(same.columns) - set(base.columns) == set(extra), "no cloud file: no new columns"
+    pd.testing.assert_frame_equal(base, same.drop(columns=extra))     # a fully clear sky changes nothing
+
+    # 4. the anomaly detector reads the real calendar_daily.csv: obscured days stay unscored, even in the re-admission variant
+    rng = np.random.default_rng(11)
+    idx = pd.date_range("2012-01-01", "2019-12-31", freq="D")
+    doy = anomaly.doy365(idx.to_series())
+    val = (200 * np.exp(-0.5 * ((doy - 200) / 35.0) ** 2) + 5) * np.exp(rng.normal(0, 0.15, len(idx)))
+    obsc = pd.DatetimeIndex(["2014-02-03", "2015-07-04", "2017-11-20"])
+    status = pd.Series("measured", index=idx)
+    status.loc[obsc] = "observed_obscured"
+    table = pd.DataFrame({"date": idx, "harmonized_status": status.to_numpy(),
+                          anomaly.VALUE_COL: np.where(status == "observed_obscured", np.nan, val)})
+    with tempfile.TemporaryDirectory() as td:
+        table.to_csv(Path(td) / "calendar_daily.csv", index=False)
+        old = anomaly.PROCESSED_DIR
+        anomaly.PROCESSED_DIR = Path(td)
+        try:
+            acal = anomaly.load_series()
+        finally:
+            anomaly.PROCESSED_DIR = old
+    assert (acal.loc[obsc, "status"] == "observed_obscured").all() and not acal.loc[obsc, "valid"].any()
+    assert acal.loc[obsc, "value"].isna().all() and acal.loc[obsc, "value_measured"].isna().all()
+    assert acal["valid"].sum() == len(idx) - len(obsc)
+    scored = anomaly.score(acal)
+    readmit = anomaly.score(acal, valid=acal["status"].isin(("measured", "measured_zero", "measured_low_coverage")).to_numpy())
+    assert scored.loc[obsc, "z"].isna().all() and readmit.loc[obsc, "z"].isna().all(), "obscured days are never scored"
+    assert anomaly_validation.missing_observation_checks(acal, scored, {})["days_by_status"]["observed_obscured"] == len(obsc)
+    print("cloud: MOD35 decoding, file checks, status logic (precedence, threshold, unknown days) and anomaly exclusion verified")
 
 
 # --------------------------------------------------------------------------- C. grid
@@ -473,6 +622,7 @@ def main():
     check_heterogeneity()
     check_k_model()
     check_calendar(M, V)
+    check_cloud()
     check_grid(M, V)
     check_anomalies()
     check_stub_season()

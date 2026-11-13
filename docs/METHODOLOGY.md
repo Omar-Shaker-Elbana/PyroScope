@@ -192,6 +192,7 @@ absent from the VIIRS file could be silently filled with a MODIS-scaled value. B
 | `measured` | VIIRS reference observed, >= 1 detection | VIIRS FRP | 3,944 |
 | `measured_zero` | VIIRS observed, 0 detections, in a sparse series where that is plausible | 0.0 | 0 |
 | `measured_low_coverage` | VIIRS present but the day lost overpasses (outage suspect): the number is a **lower bound** | VIIRS FRP, flagged | 35 |
+| `observed_obscured` | VIIRS delivered data, 0 detections, but the clear-sky share is below `PYRO_CLOUD_MIN_CLEAR` (needs a cloud file, section 2.5) | NaN | 0 (no cloud file) |
 | `viirs_not_observed` | no usable VIIRS data (absent from the raw file) | NaN | 36 |
 | `partial_day` | the window starts / ends inside this UTC day | NaN | 2 |
 
@@ -227,6 +228,47 @@ ratio 9.3), Aqua has no detection on 46 % of days, and the log-log correlation i
 inside co-detected footprints only; it does not recover the small fires MODIS misses. A filled day would look like a
 collapse of fire activity. Days with no VIIRS data but Aqua detections are marked `modis_only_evidence = true` and
 `modis_frp_viirs_equiv_mw` stays available as information, never as the series.
+
+### 2.5 Cloud-obscured days (`observed_obscured`, optional; `src/cloud_mask.py`)
+
+Sections 2.2 and 2.3 separate "the sensor did not look" from "no fire". A third case remained: the satellite passed, the
+file has rows for the day, and cloud hid the ground, so 0 detections says little about fire. FIRMS files contain no
+cloud information, so such a day was a `measured_zero` (or, in a dense series, `measured_low_coverage`).
+
+* **Input.** `PYRO_CLOUD_FILE`: a CSV with one row per UTC day (and optionally per satellite): `date` and `clear_fraction`
+  (share of the area of interest that was clear, 0-1; `cloud_fraction`, `clear_percent`, `cloud_percent` are accepted and
+  never guessed: a value above 1 in a fraction column is an error). Several rows for one day are averaged. A satellite
+  with rows of its own uses only those; otherwise rows without a satellite apply to the reference VIIRS satellite.
+  The file is validated before the slow steps; a bad or unreadable file stops the run, because a cloud file that is
+  silently ignored would look like clear sky.
+* **Rule.** On a day that is complete and observed, with clear share `c` and `PYRO_CLOUD_MIN_CLEAR` = 0.5 by default:
+
+| situation | `harmonized_status` |
+|---|---|
+| not complete / not observed | `partial_day` / `viirs_not_observed` (unchanged; cloud cannot matter) |
+| `c < 0.5`, 0 detections | `observed_obscured`, harmonized value NaN |
+| `c < 0.5`, detections, `PYRO_CLOUD_OBSCURE_NONZERO=1` | `observed_obscured`, harmonized value NaN (the sensor's own FRP stays in `viirs_frp_mw`) |
+| `c < 0.5`, detections (default) | unchanged (`measured` / `measured_low_coverage`), flagged `viirs_cloud_limited` |
+| `c >= 0.5`, or cloud cover unknown | unchanged: an empty day is a measured zero / outage suspect as before |
+
+* **Unknown is not clear.** A day missing from the file, or with an empty value, has unknown cloud cover and keeps its old
+  status; `viirs_clear_fraction` is NaN there and the count of such days is written to `frp_mapping.json`
+  (`cloud_obscuration.days_without_cloud_info`).
+* **Cloud wins over the outage detector.** An empty day under cloud is expected; an empty day under clear sky in a dense
+  series is still `measured_low_coverage`.
+* **Detections are real.** A day with detections is not turned into a missing day by default: its FRP is a lower bound,
+  as for `measured_low_coverage`, and it is only flagged. Switch on `PYRO_CLOUD_OBSCURE_NONZERO` to drop those days from
+  the anomaly series as well (this also removes real events that were seen through gaps in the cloud).
+* **Anomalies.** `observed_obscured` days are never scored (`anomaly_report.json`: `cloud_obscured_days_excluded`). In a
+  sparse series this removes cloud-caused zeros from the baseline, which therefore moves up slightly and no longer
+  makes the next clear day look anomalous.
+* **What it does not do.** The clear share is one number per day for the whole area of interest: 60 % clear over a large
+  area can still hide the one region that burns, and the threshold 0.5 is a convention, not an estimate. The cloud
+  product (MOD35 / MYD35, a VIIRS cloud mask) is not downloaded by this code, and how "probably clear" pixels are counted
+  and day and night overpasses are averaged is decided when the file is built (`cloud_mask.clear_share_from_mod35`
+  counts confident and probably clear pixels as clear, and pixels where the mask is undetermined as not clear). Only the
+  VIIRS reference series is affected; the Aqua and Terra columns are not changed. The Egypt results in this document were
+  produced without a cloud file and are unchanged.
 
 ---
 
@@ -360,5 +402,6 @@ metrics move smoothly with the size.
   for a yearly k.
 * The anomaly baseline mixes years of different activity (section 3.2). Episodes remain statistical candidates;
   confirmation needs independent evidence (burned-area, news, field reports).
-* `*_observed` flags are inferred from row counts.
+* `*_observed` flags are inferred from row counts. Cloud obscuration (section 2.5) needs an external daily clear-sky
+  file; without one, an empty observed day under cloud is still read as a measured zero.
 * The seasonal window, MAD floor and episode rule are conventions, not estimates. The null model of section 3.4 is crude.

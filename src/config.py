@@ -81,6 +81,22 @@ COV_EXTREME_FRAC = float(os.getenv("PYRO_COV_EXTREME_FRAC", 0.2))
 COV_MIN_EXPECTED = float(os.getenv("PYRO_COV_MIN_EXPECTED", 20))
 COV_CLUSTER_GAP_MIN = float(os.getenv("PYRO_COV_GAP_MIN", 25))   # minutes between detections that start a new overpass
 
+# --- Cloud obscuration (cloud_mask.py, harmonize.py): the third observation status "observed, obscured" ---
+# PYRO_CLOUD_FILE = CSV with one row per UTC day (and optionally per satellite): date, clear_fraction (0..1) - see
+# cloud_mask.py for the accepted columns. Unset (default) = no cloud information: every output is identical to a run
+# without this feature. A day that is not in the file has unknown cloud cover and is never treated as clear or cloudy.
+_cloud = os.getenv("PYRO_CLOUD_FILE")
+CLOUD_FILE = (Path(_cloud) if Path(_cloud).is_absolute() else ROOT / _cloud) if _cloud else None
+# An observed day with 0 detections whose clear-sky share is BELOW this value is `observed_obscured` (harmonized value
+# NaN), not a measured zero: with that much cloud, "no detection" is not evidence of "no fire". A convention, not an estimate.
+CLOUD_MIN_CLEAR = float(os.getenv("PYRO_CLOUD_MIN_CLEAR", 0.5))
+if not 0.0 <= CLOUD_MIN_CLEAR <= 1.0:
+    raise SystemExit(f"PYRO_CLOUD_MIN_CLEAR must be a share between 0 and 1, got {CLOUD_MIN_CLEAR:g} (0.5 = half of the area clear).")
+# PYRO_CLOUD_OBSCURE_NONZERO=1 also marks cloud-limited days that DID have detections as observed_obscured (their FRP is
+# then a lower bound and is left out of the anomaly series). Default 0: detections are real, the day keeps its status
+# and is only flagged in the calendar column viirs_cloud_limited.
+CLOUD_OBSCURE_NONZERO = os.getenv("PYRO_CLOUD_OBSCURE_NONZERO", "0") == "1"
+
 # --- Anomalies and critical burning windows (anomaly.py) ---
 ANOM_MIN_YEARS = int(os.getenv("PYRO_ANOM_MIN_YEARS", 5))   # fewer valid years -> flagged UNRELIABLE
 ANOM_Z = float(os.getenv("PYRO_ANOM_Z", 3.0))               # robust z for an anomalous day

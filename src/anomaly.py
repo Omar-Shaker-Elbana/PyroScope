@@ -6,9 +6,11 @@ data/processed/calendar_daily.csv from `python -m src.harmonize`.
 What it does
  1. Builds one daily series on the VIIRS reference scale from days whose `harmonized_status` is `measured` or
     `measured_zero`. Everything else is MISSING, never zero: days the VIIRS file does not contain
-    (`viirs_not_observed`), the two partial days at the window edges (`partial_day`), and days that look like
+    (`viirs_not_observed`), the two partial days at the window edges (`partial_day`), days that look like
     partial outages (`measured_low_coverage`, excluded unless PYRO_ANOM_INCLUDE_LOW_COVERAGE=1, because a day that lost
-    overpasses is biased low and would be flagged as a 'low' anomaly). MODIS is never substituted for VIIRS.
+    overpasses is biased low and would be flagged as a 'low' anomaly) and, when the calendar was built with a cloud file
+    (PYRO_CLOUD_FILE), days that were observed but obscured by cloud with no detection (`observed_obscured`: not a
+    confirmed zero, so never scored). MODIS is never substituted for VIIRS.
  2. Anomalies: for every day, a robust baseline (median and MAD of log1p FRP) taken from the
     same time of year (+- PYRO_ANOM_WINDOW days) in ALL OTHER YEARS (leave-one-year-out, so an
     extreme year cannot hide itself). robust z = (x - median) / (1.4826 * MAD).
@@ -340,7 +342,7 @@ def main():
     by_status = {k: int(v) for k, v in cal["status"].value_counts().items()}
     excluded = int(len(cal) - n_valid)
     if excluded > 0.05 * len(cal):
-        reasons.append(f"{excluded / len(cal):.0%} of days are not usable (not observed, partial or outage-suspect)")
+        reasons.append(f"{excluded / len(cal):.0%} of days are not usable (not observed, partial, outage-suspect or cloud-obscured)")
     reliable = not reasons
 
     df = score(cal)
@@ -369,6 +371,7 @@ def main():
         "valid_days": n_valid, "missing_days": excluded, "years_of_valid_days": round(n_years, 2),
         "days_by_status": by_status,
         "outage_suspect_days_excluded": 0 if ANOM_INCLUDE_LOW_COVERAGE else by_status.get("measured_low_coverage", 0),
+        **({"cloud_obscured_days_excluded": by_status["observed_obscured"]} if by_status.get("observed_obscured") else {}),
         "anomalous_days_high": int((df["flag"] == "high").sum()),
         "anomalous_days_low": int((df["flag"] == "low").sum()),
         "episodes": int(len(events)), "season_starts_at_doy": season_start_doy,

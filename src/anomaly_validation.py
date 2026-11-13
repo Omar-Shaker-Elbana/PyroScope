@@ -212,7 +212,7 @@ def baseline_distortion(df):
 # --------------------------------------------------------------------------- 3: missing observations
 def missing_observation_checks(cal, df, frames):
     status = cal["status"]
-    unobs = status.isin(("viirs_not_observed", "partial_day", "absent"))
+    unobs = status.isin(("viirs_not_observed", "partial_day", "absent", "observed_obscured"))
     near_gap = unobs.shift(1, fill_value=False) | unobs.shift(-1, fill_value=False)
     low = df["flag"] == "low"
     out = {

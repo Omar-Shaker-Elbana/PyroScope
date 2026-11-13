@@ -3,6 +3,29 @@
 Backend only (no frontend work). Evidence and reasoning: `docs/METHODOLOGY.md`. A unified diff against
 `pyroscope_modis_viirs_not_final.zip` is in `docs/CHANGES_vs_not_final.patch`.
 
+## Follow-up: cloud-obscured days as a third observation status (review point 6)
+
+* New `src/cloud_mask.py`: reads and validates an optional daily clear-sky table (`PYRO_CLOUD_FILE`: `date`,
+  `clear_fraction`; `cloud_fraction`, `clear_percent`, `cloud_percent` and a `satellite` column also accepted), selects
+  the rows of the reference VIIRS satellite, and decodes a MOD35 `Cloud_Mask` byte (`clear_share_from_mod35`).
+  `python -m src.cloud_mask file.csv` checks a file. A bad file stops the run before the slow steps; a day that is
+  not in the file has unknown cloud cover, never "clear".
+* `harmonize.py`: `build_calendar(..., clear=None)`. An observed, complete day with 0 detections and a clear share below
+  `PYRO_CLOUD_MIN_CLEAR` (0.5) is `harmonized_status = observed_obscured` (harmonized value NaN, `harmonized_source`
+  none), not a measured zero; the cloud explanation takes precedence over `measured_low_coverage`. Days with detections
+  keep their status and get `viirs_cloud_limited` (`PYRO_CLOUD_OBSCURE_NONZERO=1` marks them obscured too). New calendar
+  columns `viirs_clear_fraction`, `viirs_cloud_limited` and a `cloud_obscuration` block in `frp_mapping.json`, only when a
+  cloud file is given.
+* `anomaly.py` / `anomaly_validation.py`: `observed_obscured` days are missing (never zero, never scored, not re-admitted
+  by the outage-suspect variant); counted in `anomaly_report.json` (`cloud_obscured_days_excluded`, only when present) and
+  in the "not usable" reason; treated as unobserved neighbours in the low-flag check.
+* New settings: `PYRO_CLOUD_FILE`, `PYRO_CLOUD_MIN_CLEAR`, `PYRO_CLOUD_OBSCURE_NONZERO`. **Without `PYRO_CLOUD_FILE` every
+  output is identical to before.**
+* `selftest.py`: `check_cloud` (decoder with planted bytes, file validation, satellite selection, every status case
+  including precedence, the threshold edge and unknown days, equivalence with a fully clear sky, and the real
+  `anomaly.load_series` path).
+* Not included: downloading or clipping MOD35 / VIIRS cloud-mask granules (see `docs/METHODOLOGY.md` section 2.5).
+
 ## Follow-up: k as a model of fire size (review point 1, first half)
 
 * New `src/kmodel.py`: quasi-Poisson regression of VIIRS footprint FRP on MODIS FRP, day/night and time gap (offset

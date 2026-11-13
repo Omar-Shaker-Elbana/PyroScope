@@ -15,7 +15,9 @@ Steps
     gap) when cross-validation shows it should (kmodel.py; PYRO_K_MODEL=0 switches this off).
  4. Build the calendar on the VIIRS reference scale. A day with no detections is NOT a day without observations:
     every sensor-level number is NaN (not 0) on a day the sensor did not deliver data, and `harmonized_status` says
-    exactly what a row is (measured / measured_zero / measured_low_coverage / viirs_not_observed / partial_day).
+    exactly what a row is (measured / measured_zero / measured_low_coverage / observed_obscured / viirs_not_observed /
+    partial_day). `observed_obscured` (needs PYRO_CLOUD_FILE, see cloud_mask.py) is a day the sensor delivered but whose
+    clear-sky share is too low for "0 detections" to mean "no fire".
     MODIS is never substituted for a missing VIIRS day (it sees ~3-5x less FRP than VIIRS and predicts VIIRS daily
     totals poorly: see `daily_total_relationship` in frp_mapping.json) and sensors are never summed.
  5. Diagnostics (harmonize_validation.py): what k depends on, and how the 0.5 deg aggregation grid changes the
@@ -33,6 +35,7 @@ import pandas as pd
 from scipy import stats
 from scipy.spatial import cKDTree
 
+from src import cloud_mask
 from src import harmonize_validation as hv
 from src import kmodel
 from src.config import (
@@ -40,6 +43,7 @@ from src.config import (
     K_FIT_MAX_DT_MIN, K_TRUST_MIN_PAIRS, MAX_ROWS, REF_SAT, AOI_FILE, EXCLUDE_STATIC,
     APPLY_UNVALIDATED_K, N_BOOT, K_TAU_MAX, GRID_SENS_DEG, COV_MIN_FRAC, COV_EXTREME_FRAC, COV_MIN_EXPECTED, COV_CLUSTER_GAP_MIN,
     K_MODEL, K_MODEL_BOOT, K_MODEL_FOLDS, K_MODEL_CLIP_Q,
+    CLOUD_FILE, CLOUD_MIN_CLEAR, CLOUD_OBSCURE_NONZERO,
 )
 from src.kstats import (
     KM_PER_DEG, R_KM, cell_area_km2, heterogeneity, infer_missing_days, prediction_interval, ratio_ci,
@@ -521,14 +525,23 @@ def flag_low_coverage(det, clusters, min_frac=None, min_expected=None, extreme_f
 STATUS_MEASURED = ("measured", "measured_zero", "measured_low_coverage")
 
 
-def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None):
+def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None, clear=None, min_clear=None,
+                   obscure_nonzero=None):
     """Daily calendar + cell-day table.
 
     observed : {"viirs": set-of-days | None, "<MODIS satellite>": set-of-days | None}; None / missing key = unknown,
                treated as observed (and said so in frp_mapping.json).
+    clear    : optional Series (index = day) with the clear-sky share 0..1 of the area on that day for the reference VIIRS
+               satellite (cloud_mask.clear_series); NaN / a missing day = cloud cover unknown (NOT clear). None = no cloud
+               information: the calendar is then exactly what it was before this option existed (no extra column).
+    min_clear / obscure_nonzero : a day with clear share < min_clear (default PYRO_CLOUD_MIN_CLEAR) and 0 detections is
+               `observed_obscured`; with obscure_nonzero (default PYRO_CLOUD_OBSCURE_NONZERO) so is a cloud-limited day that
+               had detections.
     Every sensor-level number is NaN on a day that sensor did not deliver data; `harmonized_status` is explicit."""
     observed = observed or {}
     scale_basis = scale_basis or {}
+    min_clear = CLOUD_MIN_CLEAR if min_clear is None else min_clear
+    obscure_nonzero = CLOUD_OBSCURE_NONZERO if obscure_nonzero is None else obscure_nonzero
     days = pd.date_range(t0.tz_localize(None).floor("D"), t1.tz_localize(None).floor("D"), freq="D")
     cal = pd.DataFrame(index=days)
     cal.index.name = "date"
@@ -594,11 +607,20 @@ def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None):
     mac = mb["cells"]
     cal["modis_cells_also_viirs"] = np.where(mac > 0, both / mac.where(mac > 0), np.nan)
 
-    # --- what each row IS: measured / zero / outage-suspect / not observed / partial day
+    # --- what each row IS: measured / zero / outage-suspect / obscured / not observed / partial day
     det = cal["viirs_detections"].fillna(-1).to_numpy()
+    obscured = np.zeros(len(days), bool)
+    if clear is not None:
+        c = pd.Series(clear).reindex(days).to_numpy(float)       # unknown (NaN) is never clear and never cloudy
+        limited = np.isfinite(c) & (c < min_clear)
+        # an empty observed day under cloud is not "no fire"; the cloud explanation also wins over the outage detector,
+        # because few detections on a cloudy day are expected, whereas few detections on a clear day are suspicious
+        obscured = limited & ((det == 0) | bool(obscure_nonzero))
+        cal["viirs_clear_fraction"] = c
+        cal["viirs_cloud_limited"] = limited & v_obs & complete
     status = np.select(
-        [~complete, ~v_obs, cal["viirs_low_coverage"].to_numpy(), det == 0],
-        ["partial_day", "viirs_not_observed", "measured_low_coverage", "measured_zero"],
+        [~complete, ~v_obs, obscured, cal["viirs_low_coverage"].to_numpy(), det == 0],
+        ["partial_day", "viirs_not_observed", "observed_obscured", "measured_low_coverage", "measured_zero"],
         default="measured")
     cal["day_complete"] = complete
     cal["viirs_observed"] = v_obs
@@ -706,7 +728,25 @@ def plot_matchup(pairs, k, info, path):
 
 
 # --------------------------------------------------------------------------- main
+def cloud_summary(cal, info, min_clear, obscure_nonzero):
+    """What the cloud information did to the calendar (counts), added to the info of cloud_mask.clear_series."""
+    status = cal["harmonized_status"]
+    limited = cal["viirs_cloud_limited"].astype(bool)
+    det = cal["viirs_detections"].fillna(-1)
+    info = dict(info, enabled=True, min_clear_fraction=float(min_clear), obscure_nonzero=bool(obscure_nonzero))
+    info.update({
+        "days_cloud_limited": int(limited.sum()),
+        "days_marked_observed_obscured": int((status == "observed_obscured").sum()),
+        "cloud_limited_days_with_detections_kept": int((limited & (det > 0) & status.isin(STATUS_MEASURED)).sum()),
+        "reading": ("observed_obscured: the sensor delivered data but the clear-sky share is below the threshold and "
+                    "there was no detection, so 'no fire' cannot be claimed; the harmonized value is NaN and the day is "
+                    "not scored by the anomaly detector. Days without cloud information keep their old status."),
+    })
+    return info
+
+
 def main():
+    cloud_table = cloud_mask.read_table(CLOUD_FILE) if CLOUD_FILE is not None else None   # fail before the slow steps
     m = load(PROCESSED_DIR / "modis_standardized.csv")
     v = load(PROCESSED_DIR / "viirs_standardized.csv")
     print(f"MODIS {len(m):,} rows, VIIRS {len(v):,} rows before clamping")
@@ -782,7 +822,14 @@ def main():
     observed["viirs"], obs_basis["viirs"] = observed_days("viirs", ref_sat)
     for s in mod_sats:
         observed[s], obs_basis[s] = observed_days("modis", s)
-    cal, cells = build_calendar(m, v, ref_sat, t0, t1, observed, basis)
+    clear = cloud_info = None
+    if cloud_table is not None:
+        clear, cloud_info = cloud_mask.clear_series(
+            cloud_table, ref_sat, pd.date_range(t0.tz_localize(None).floor("D"), t1.tz_localize(None).floor("D"), freq="D"))
+    cal, cells = build_calendar(m, v, ref_sat, t0, t1, observed, basis, clear)
+    if cloud_info is not None:
+        cloud_info = cloud_summary(cal, cloud_info, CLOUD_MIN_CLEAR, CLOUD_OBSCURE_NONZERO)
+        print(cloud_mask.describe(cloud_info))
 
     primary = max(mod_sats, key=lambda s: fits[s][1].get("n_pairs", 0)) if mod_sats else None
     info = {
@@ -811,6 +858,9 @@ def main():
                   "conditional on a MODIS detection; it is not a physical calibration, not a detection-probability "
                   "correction, and it is specific to the MODIS satellite it was fitted on.",
     }
+
+    if cloud_info is not None:
+        info["cloud_obscuration"] = cloud_info
 
     # 4) spatial-aggregation diagnostics (what the 0.5 deg grid does and does not change)
     if primary is not None and fits[primary][0] is not None:
