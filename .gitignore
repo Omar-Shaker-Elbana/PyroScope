@@ -69,3 +69,5 @@ data/processed_*/
 .cache/
 .temp/
 tmp/
+output.tst
+HotSync_harmonized Final.html
