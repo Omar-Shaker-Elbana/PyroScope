@@ -11,6 +11,8 @@ Steps
     prediction interval for an unseen year and a chronological hold-out. A satellite that has no close-in-time
     matches (Terra vs S-NPP: ~150 min apart) gets NO k and NO VIIRS-equivalent FRP; its k is never borrowed from
     another satellite unless PYRO_APPLY_UNVALIDATED_K=1, and then every value is labelled.
+    The constant k is the headline number, but the scale that is APPLIED can depend on fire size (and day/night, time
+    gap) when cross-validation shows it should (kmodel.py; PYRO_K_MODEL=0 switches this off).
  4. Build the calendar on the VIIRS reference scale. A day with no detections is NOT a day without observations:
     every sensor-level number is NaN (not 0) on a day the sensor did not deliver data, and `harmonized_status` says
     exactly what a row is (measured / measured_zero / measured_low_coverage / viirs_not_observed / partial_day).
@@ -32,10 +34,12 @@ from scipy import stats
 from scipy.spatial import cKDTree
 
 from src import harmonize_validation as hv
+from src import kmodel
 from src.config import (
     PROCESSED_DIR, BBOX, START_DATE, END_DATE, CELL_DEG, MATCH_MAX_MIN, DAY_TOL_MIN, MIN_PAIRS_FIT,
     K_FIT_MAX_DT_MIN, K_TRUST_MIN_PAIRS, MAX_ROWS, REF_SAT, AOI_FILE, EXCLUDE_STATIC,
     APPLY_UNVALIDATED_K, N_BOOT, K_TAU_MAX, GRID_SENS_DEG, COV_MIN_FRAC, COV_EXTREME_FRAC, COV_MIN_EXPECTED, COV_CLUSTER_GAP_MIN,
+    K_MODEL, K_MODEL_BOOT, K_MODEL_FOLDS, K_MODEL_CLIP_Q,
 )
 from src.kstats import (
     KM_PER_DEG, R_KM, cell_area_km2, heterogeneity, infer_missing_days, prediction_interval, ratio_ci,
@@ -297,8 +301,10 @@ def k_trust_grade(use, k, ci, by_year, het):
 
 
 def fit_scale(pairs, label=""):
-    """Constant aggregate scale k (VIIRS-equivalent FRP = k * MODIS FRP) for ONE MODIS satellite.
-    Estimated over footprints where BOTH sensors detected fire (conditional on a MODIS detection), so it is not a
+    """Constant aggregate scale k (VIIRS-equivalent FRP = k * MODIS FRP) for ONE MODIS satellite, plus (info["k_model"])
+    the conditional version k(fire size, day/night, time gap) that kmodel.py fits and cross-validates on the same pixels.
+    The returned k is always the constant ratio of sums; whether the conditional model is applied is decided in
+    decide_scales. Estimated over footprints where BOTH sensors detected fire (conditional on a MODIS detection), so it is not a
     detection probability and it ignores the many small fires only VIIRS sees.
 
     Returns (k, info). k is None when the satellite has fewer than MIN_PAIRS_FIT matches within K_FIT_MAX_DT_MIN
@@ -361,6 +367,10 @@ def fit_scale(pairs, label=""):
         "k_year_heterogeneity": het, "n_days_used": n_days, "k_ci_rel_width": ci_rel,
         "interpretation": _interpret(by_year, het, ks),
     })
+    # separate generator: leaves every number above bit-identical to a run without the model
+    info["k_model"] = (kmodel.fit_k_model(use, np.random.default_rng(1), K_MODEL_BOOT, K_MODEL_CLIP_Q, K_MODEL_FOLDS)
+                       if K_MODEL else {"available": False, "adopted": False, "model": None,
+                                        "reason": "disabled (PYRO_K_MODEL=0)"})
     return float(k), info
 
 
@@ -393,15 +403,21 @@ def k_by_group(pairs, column):
 
 def decide_scales(fits):
     """Which satellites receive a VIIRS-equivalent FRP, and on what basis.
-    Default: only satellites whose k was fitted on close-in-time matches ('own'); every other satellite gets NaN.
-    PYRO_APPLY_UNVALIDATED_K=1: also apply a low-trust own fit ('own_low_trust') or, failing that, the k of the
-    best-validated satellite ('transferred:<sat>'), all labelled."""
+    Default: only satellites whose k was fitted on close-in-time matches; every other satellite gets NaN.
+      'own'              constant k (no covariate beat it in cross-validation, or PYRO_K_MODEL=0)
+      'own_conditional'  k depends on fire size (and day/night, time gap) as selected by cross-validation (kmodel.py)
+    PYRO_APPLY_UNVALIDATED_K=1: also apply a low-trust own fit ('own_low_trust') or, failing that, the CONSTANT k of the
+    best-validated satellite ('transferred:<sat>'), all labelled. A conditional model is never transferred."""
     scale, basis = {}, {}
     for s, (k, info) in fits.items():
         if k is not None:
             scale[s] = {"k": k, "k_lo": info["k_prediction_interval95_new_year"][0],
                         "k_hi": info["k_prediction_interval95_new_year"][1]}
             basis[s] = "own"
+            km = info.get("k_model") or {}
+            if km.get("adopted") and km.get("model"):
+                scale[s]["model"] = km["model"]
+                basis[s] = "own_conditional"
     donors = sorted(scale, key=lambda s: -fits[s][1]["n_pairs"])
     for s, (k, info) in fits.items():
         if s in scale:
@@ -415,14 +431,16 @@ def decide_scales(fits):
             basis[s] = "own_low_trust"
         elif donors:
             d = scale[donors[0]]
-            scale[s] = dict(d)
+            scale[s] = {c: d[c] for c in ("k", "k_lo", "k_hi")}
             basis[s] = f"transferred:{donors[0]}"
     return scale, basis
 
 
 def apply_scale(df, scale, basis=None):
     """Adds frp_equiv (+ lo/hi from the prediction interval of k) and scale_basis. NaN where the satellite has no
-    scale: a missing k is never replaced by 1 or by another satellite's k unless decide_scales allowed it."""
+    scale: a missing k is never replaced by 1 or by another satellite's k unless decide_scales allowed it.
+    A satellite with a conditional model gets frp * k(frp, day/night) evaluated at dt = 0 (simultaneous overpass); its
+    lo / hi keep the RELATIVE width of the constant-k prediction interval (aggregate sampling error + between-year tau)."""
     df = df.copy()
     if (df["sensor_family"] == "VIIRS").all():
         df["frp_equiv"] = df["frp"]
@@ -430,11 +448,37 @@ def apply_scale(df, scale, basis=None):
         df["scale_basis"] = "reference"
         return df
     sat = df["source_satellite"]
-    df["frp_equiv"] = df["frp"] * sat.map({s: d["k"] for s, d in scale.items()}).astype(float)
-    df["frp_equiv_lo"] = df["frp"] * sat.map({s: d["k_lo"] for s, d in scale.items()}).astype(float)
-    df["frp_equiv_hi"] = df["frp"] * sat.map({s: d["k_hi"] for s, d in scale.items()}).astype(float)
+    frp = df["frp"].to_numpy(float)
+    night = kmodel.night_flag(df["daynight"]) if "daynight" in df.columns else None
+    eq, lo, hi = (np.full(len(df), np.nan) for _ in range(3))
+    for s, d in scale.items():
+        sel = (sat == s).to_numpy()
+        if not sel.any():
+            continue
+        if d.get("model"):
+            r = kmodel.predict_ratio(d["model"], frp[sel], None if night is None else night[sel])
+            eq[sel] = frp[sel] * r
+            lo[sel], hi[sel] = eq[sel] * (d["k_lo"] / d["k"]), eq[sel] * (d["k_hi"] / d["k"])
+        else:
+            eq[sel], lo[sel], hi[sel] = frp[sel] * d["k"], frp[sel] * d["k_lo"], frp[sel] * d["k_hi"]
+    df["frp_equiv"], df["frp_equiv_lo"], df["frp_equiv_hi"] = eq, lo, hi
     df["scale_basis"] = sat.map(basis or {}).fillna("none")
     return df
+
+
+def applied_scale(m, scale):
+    """The aggregate scale actually applied to each MODIS satellite: sum(frp_equiv) / sum(frp). For a constant k this
+    is k; for a conditional model it is the FRP-weighted mean of k(frp, ...) over that satellite's detections."""
+    out = {}
+    for s in sorted(m["source_satellite"].unique()):
+        g = m[m["source_satellite"] == s]
+        if s not in scale or g["frp"].sum() <= 0:
+            out[s] = None
+        elif not scale[s].get("model"):
+            out[s] = float(scale[s]["k"])
+        else:
+            out[s] = float(g["frp_equiv"].sum() / g["frp"].sum())
+    return out
 
 
 # --------------------------------------------------------------------------- calendar
@@ -642,7 +686,13 @@ def plot_matchup(pairs, k, info, path):
     lim = np.array([max(allp["frp"].min(), 0.1), allp["frp"].max()])
     ax.plot(lim, lim, "k--", lw=1, label="identity (1:1)")
     if k:
-        ax.plot(lim, k * lim, "r-", lw=2, label=f"VIIRS-equivalent = {k:.2f} x MODIS")
+        ax.plot(lim, k * lim, "r-", lw=2, label=f"constant k = {k:.2f} x MODIS")
+    km = info.get("k_model") or {}
+    if km.get("adopted") and km.get("curve"):
+        c = km["curve"]
+        f = np.array([r["frp"] for r in c])
+        ax.fill_between(f, f * np.array([r["k_lo"] for r in c]), f * np.array([r["k_hi"] for r in c]), color="#1f77b4", alpha=0.18)
+        ax.plot(f, f * np.array([r["k"] for r in c]), color="#1f77b4", lw=2, label="conditional k(FRP) at dt = 0 (95% band)")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel(f"MODIS {info.get('modis_satellite', '')} pixel FRP (MW)")
     ax.set_ylabel("Sum of VIIRS 375 m FRP inside the MODIS footprint (MW)")
@@ -740,11 +790,14 @@ def main():
         "reference_viirs_satellite": ref_sat, "fit_viirs_satellite": fit_vs,
         "primary_modis_satellite": primary,
         "k_by_modis_satellite": {s: fits[s][0] for s in mod_sats},      # fitted on close-in-time matches; null = not validated
-        "k_applied_to_calendar": {s: (scale[s]["k"] if s in scale else None) for s in mod_sats},
+        "k_applied_to_calendar": applied_scale(m, scale),          # sum(frp_equiv) / sum(frp): equals k for a constant scale
+        "scale_form": {s: ("conditional" if scale.get(s, {}).get("model") else ("constant" if s in scale else None))
+                       for s in mod_sats},
         "scale_basis": basis,
         "scale_policy": {
             "rule": "a k is applied only to the satellite it was fitted on, from matches within "
                     f"{K_FIT_MAX_DT_MIN:g} min of VIIRS; a satellite without such matches gets NaN",
+            "conditional_scale_enabled": K_MODEL,
             "apply_unvalidated_k": APPLY_UNVALIDATED_K,
             "satellites_without_scale": [s for s in mod_sats if s not in scale]},
         "modis_satellites": {s: fits[s][1] for s in mod_sats},
@@ -772,6 +825,8 @@ def main():
         info["detection_sensitivity"]["like_for_like"] = grid_info["at_calendar_grid"]
         hv.plot_grid(grid_df, CELL_DEG, PROCESSED_DIR / "grid_sensitivity.png")
         hv.plot_k_by_year(fits[primary][1], primary, PROCESSED_DIR / "k_by_year.png")
+        if (fits[primary][1].get("k_model") or {}).get("available"):
+            hv.plot_k_model(fits[primary][1], primary, PROCESSED_DIR / "k_model.png")
         plot_matchup(sub, fits[primary][0], fits[primary][1], PROCESSED_DIR / "frp_matchup.png")
 
     (PROCESSED_DIR / "frp_mapping.json").write_text(hv.dumps(info))
@@ -784,6 +839,8 @@ def main():
         i_ = fits[s][1]
         if i_.get("interpretation"):
             print(f"  {s}: {i_['interpretation']}")
+        if fits[s][0] is not None:
+            print(f"  {s}: {kmodel.describe(i_.get('k_model'))}")
         for p_ in i_.get("k_trust_problems", []):
             print(f"  {s}: - {p_}")
     print("Calendar rows by harmonized_status:", json.dumps(info["harmonized_status_counts"]))
@@ -796,7 +853,7 @@ def main():
     show[num] = show[num].round(2)
     print(show.to_string(index=False))
     print("\nSaved matched_pairs.csv, calendar_daily.csv, calendar_cells.csv, frp_mapping.json, grid_sensitivity.csv, "
-          "grid_sensitivity.png, k_by_year.png, frp_matchup.png in", PROCESSED_DIR)
+      "grid_sensitivity.png, k_by_year.png, k_model.png, frp_matchup.png in", PROCESSED_DIR)
 
 
 if __name__ == "__main__":

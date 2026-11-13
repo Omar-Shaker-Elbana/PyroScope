@@ -3,6 +3,23 @@
 Backend only (no frontend work). Evidence and reasoning: `docs/METHODOLOGY.md`. A unified diff against
 `pyroscope_modis_viirs_not_final.zip` is in `docs/CHANGES_vs_not_final.patch`.
 
+## Follow-up: k as a model of fire size (review point 1, first half)
+
+* New `src/kmodel.py`: quasi-Poisson regression of VIIRS footprint FRP on MODIS FRP, day/night and time gap (offset
+  `log(MODIS FRP)`, so it nests the constant k and preserves totals), covariates chosen by 10-fold cross-validation with
+  whole cells held out and a one-standard-error rule, coefficient CIs by cell-cluster bootstrap.
+* `harmonize.py`: `fit_scale` adds `k_model` to the satellite's info (the constant k, its CI and `k_trust` are
+  unchanged); `decide_scales` applies it when adopted (`scale_basis = own_conditional`); `apply_scale` evaluates it at
+  `dt = 0` with FRP clipped to the fitted range; new `applied_scale` -> `k_applied_to_calendar`, `scale_form`.
+  A conditional model is never transferred to another satellite; Terra is still NaN.
+* New outputs: `k_model.png`; `frp_matchup.png` shows the conditional curve; `k_model` block in `frp_mapping.json`.
+* New settings: `PYRO_K_MODEL` (`0` = constant k, outputs identical to before), `PYRO_K_MODEL_BOOT`,
+  `PYRO_K_MODEL_FOLDS`, `PYRO_K_MODEL_CLIP_Q`.
+* Egypt 2015-2025: only fire size is selected; k falls 27 % per 10x MODIS FRP (CI -40 % to -15 %); held-out deviance
+  3.1 % lower; 11-year `modis_frp_viirs_equiv_mw` sum -1.0 %. See `docs/METHODOLOGY.md` section 1.5.
+* `selftest.py`: planted-truth checks for the model (nesting, exact totals, placebo, recovery, clipping, application,
+  switch-off).
+
 ## What changed, by review point
 
 ### A. The harmonization factor

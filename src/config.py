@@ -61,6 +61,15 @@ APPLY_UNVALIDATED_K = os.getenv("PYRO_APPLY_UNVALIDATED_K", "0") == "1"
 N_BOOT = int(os.getenv("PYRO_N_BOOT", 10_000))
 # k_trust can only be HIGH if the 95 % upper limit of the between-year SD of log k (tau) is at most this value.
 K_TAU_MAX = float(os.getenv("PYRO_K_TAU_MAX", 0.15))
+# Conditional scale (kmodel.py): k as a function of fire size / day-night / time gap instead of one constant.
+# The covariates are chosen by cross-validation with whole cells held out; if none beats the constant k, the constant
+# stays. PYRO_K_MODEL=0 always applies the constant k (the model is then not even fitted).
+K_MODEL = os.getenv("PYRO_K_MODEL", "1") != "0"
+K_MODEL_BOOT = int(os.getenv("PYRO_K_MODEL_BOOT", 2000))          # cluster-bootstrap replicates for its coefficient CIs
+K_MODEL_FOLDS = int(os.getenv("PYRO_K_MODEL_FOLDS", 10))          # spatial cross-validation folds (whole cells)
+# MODIS FRP is clipped to the central (1 - 2 q) of the fitted pixels before the model is evaluated: beyond that range the
+# ratio is held at its boundary value instead of extrapolating a log-linear trend from a handful of very large fires.
+K_MODEL_CLIP_Q = float(os.getenv("PYRO_K_MODEL_CLIP_Q", 0.001))
 # Grid sizes (degrees) of the spatial-aggregation sensitivity analysis (harmonize_validation.grid_sensitivity).
 GRID_SENS_DEG = tuple(float(x) for x in (os.getenv("PYRO_GRID_SENS") or "0.05,0.1,0.25,0.5,1,2").split(","))
 # Partial-outage detector for the reference VIIRS series (see harmonize.flag_low_coverage). A day is flagged when
