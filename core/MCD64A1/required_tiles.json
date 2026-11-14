@@ -1,0 +1,88 @@
+{
+  "cell_deg": 0.5,
+  "collection": "061",
+  "tiles": [
+    "h20v05",
+    "h20v06",
+    "h21v05",
+    "h21v06"
+  ],
+  "events": [
+    {
+      "event_id": "E1",
+      "start": "2016-09-27",
+      "end": "2016-10-02",
+      "active_cells": 65,
+      "tiles": [
+        "h20v05",
+        "h20v06",
+        "h21v05",
+        "h21v06"
+      ],
+      "months": [
+        {
+          "year": 2016,
+          "month": 9
+        },
+        {
+          "year": 2016,
+          "month": 10
+        }
+      ]
+    },
+    {
+      "event_id": "E2",
+      "start": "2022-06-23",
+      "end": "2022-06-27",
+      "active_cells": 66,
+      "tiles": [
+        "h20v05",
+        "h20v06",
+        "h21v05",
+        "h21v06"
+      ],
+      "months": [
+        {
+          "year": 2022,
+          "month": 6
+        }
+      ]
+    },
+    {
+      "event_id": "E3",
+      "start": "2023-06-17",
+      "end": "2023-06-21",
+      "active_cells": 58,
+      "tiles": [
+        "h20v05",
+        "h20v06",
+        "h21v05",
+        "h21v06"
+      ],
+      "months": [
+        {
+          "year": 2023,
+          "month": 6
+        }
+      ]
+    },
+    {
+      "event_id": "E4",
+      "start": "2023-10-19",
+      "end": "2023-10-22",
+      "active_cells": 66,
+      "tiles": [
+        "h20v05",
+        "h20v06",
+        "h21v05",
+        "h21v06"
+      ],
+      "months": [
+        {
+          "year": 2023,
+          "month": 10
+        }
+      ]
+    }
+  ]
+}
