@@ -1,7 +1,11 @@
-"""python manage.py predict_countries --modis ... --viirs ... [--live-key KEY]
+"""python manage.py predict_countries [--model PATH] [--out-dir PATH]
 
 Forwards every argument after the command name to core.forecast.predict_countries's
 own argparse (Django's option parser is bypassed), so no `--` separator is needed.
+
+No longer takes --modis/--viirs/--live-key: the forecast is read straight from
+core.src.harmonize's calendar (run `manage.py download_firms` + `manage.py harmonize`
+first to refresh it).
 """
 import sys
 
