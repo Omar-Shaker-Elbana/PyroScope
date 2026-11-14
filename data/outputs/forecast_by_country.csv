@@ -1,29 +1,71 @@
 country,name,iso_n3,date,horizon_days,predicted,low_p10,high_p90,typical,busy_day,target
-EGY,Egypt,818,2026-01-01,1,124.5,0.0,209.24,142.23,False,frp
-EGY,Egypt,818,2026-01-02,2,126.83,0.0,240.34,144.42,False,frp
-EGY,Egypt,818,2026-01-03,3,141.15,0.0,214.27,146.16,False,frp
-EGY,Egypt,818,2026-01-04,4,126.06,0.0,200.52,147.05,False,frp
-EGY,Egypt,818,2026-01-05,5,133.04,0.0,212.48,145.24,False,frp
-EGY,Egypt,818,2026-01-06,6,131.5,0.0,194.67,147.95,False,frp
-EGY,Egypt,818,2026-01-07,7,129.81,0.0,193.18,147.61,False,frp
-EGY,Egypt,818,2026-01-08,8,133.24,0.0,266.27,146.34,False,frp
-EGY,Egypt,818,2026-01-09,9,131.29,0.0,209.36,148.26,False,frp
-EGY,Egypt,818,2026-01-10,10,126.26,0.0,221.01,147.41,False,frp
-EGY,Egypt,818,2026-01-11,11,126.26,0.0,221.01,145.31,False,frp
-EGY,Egypt,818,2026-01-12,12,117.96,0.0,204.3,148.44,False,frp
-EGY,Egypt,818,2026-01-13,13,115.91,0.0,204.51,149.45,False,frp
-EGY,Egypt,818,2026-01-14,14,113.12,0.0,200.92,148.45,False,frp
-PSX,Palestine,275,2026-01-01,1,0.02,0.0,0.02,0.05,True,frp
-PSX,Palestine,275,2026-01-02,2,0.03,0.0,0.03,0.05,True,frp
-PSX,Palestine,275,2026-01-03,3,0.03,0.0,0.03,0.05,True,frp
-PSX,Palestine,275,2026-01-04,4,0.03,0.0,0.03,0.05,True,frp
-PSX,Palestine,275,2026-01-05,5,0.04,0.0,0.04,0.05,True,frp
-PSX,Palestine,275,2026-01-06,6,0.06,0.0,0.15,0.05,True,frp
-PSX,Palestine,275,2026-01-07,7,0.05,0.0,0.15,0.05,True,frp
-PSX,Palestine,275,2026-01-08,8,0.03,0.0,0.03,0.05,True,frp
-PSX,Palestine,275,2026-01-09,9,0.03,0.0,0.03,0.05,True,frp
-PSX,Palestine,275,2026-01-10,10,0.03,0.0,0.03,0.05,True,frp
-PSX,Palestine,275,2026-01-11,11,0.03,0.0,0.03,0.05,True,frp
-PSX,Palestine,275,2026-01-12,12,0.03,0.0,0.03,0.0,True,frp
-PSX,Palestine,275,2026-01-13,13,0.03,0.0,0.03,0.0,True,frp
-PSX,Palestine,275,2026-01-14,14,0.03,0.0,0.03,0.0,True,frp
+EGY,Egypt,818,2026-01-01,1,120.14,0.0,227.87,147.63,False,frp
+EGY,Egypt,818,2026-01-02,2,118.12,0.0,233.54,150.15,False,frp
+EGY,Egypt,818,2026-01-03,3,137.09,0.0,229.71,151.82,False,frp
+EGY,Egypt,818,2026-01-04,4,112.56,0.0,220.39,152.69,False,frp
+EGY,Egypt,818,2026-01-05,5,118.79,0.0,219.98,150.78,False,frp
+EGY,Egypt,818,2026-01-06,6,120.69,0.0,219.98,153.57,False,frp
+EGY,Egypt,818,2026-01-07,7,118.98,0.0,219.3,153.44,False,frp
+EGY,Egypt,818,2026-01-08,8,125.65,0.0,262.33,152.03,False,frp
+EGY,Egypt,818,2026-01-09,9,124.4,0.0,247.73,153.73,False,frp
+EGY,Egypt,818,2026-01-10,10,122.35,0.0,247.73,152.21,False,frp
+EGY,Egypt,818,2026-01-11,11,123.51,0.0,248.02,149.93,False,frp
+EGY,Egypt,818,2026-01-12,12,122.47,0.0,245.9,153.56,False,frp
+EGY,Egypt,818,2026-01-13,13,121.95,0.0,245.9,154.71,False,frp
+EGY,Egypt,818,2026-01-14,14,116.28,0.0,248.07,153.55,False,frp
+ISR,Israel,376,2026-01-01,1,1.25,0.0,1.72,1.17,True,frp
+ISR,Israel,376,2026-01-02,2,1.21,0.0,1.72,1.28,True,frp
+ISR,Israel,376,2026-01-03,3,1.58,0.0,1.72,1.23,True,frp
+ISR,Israel,376,2026-01-04,4,1.58,0.0,1.75,1.16,True,frp
+ISR,Israel,376,2026-01-05,5,1.52,0.0,1.64,1.18,True,frp
+ISR,Israel,376,2026-01-06,6,2.54,0.0,2.54,1.12,True,frp
+ISR,Israel,376,2026-01-07,7,1.55,0.0,1.76,1.03,True,frp
+ISR,Israel,376,2026-01-08,8,1.13,0.0,1.76,1.04,True,frp
+ISR,Israel,376,2026-01-09,9,0.68,0.0,1.69,1.01,False,frp
+ISR,Israel,376,2026-01-10,10,1.08,0.0,1.57,1.19,True,frp
+ISR,Israel,376,2026-01-11,11,1.15,0.0,2.87,1.15,True,frp
+ISR,Israel,376,2026-01-12,12,1.74,0.0,2.0,1.28,True,frp
+ISR,Israel,376,2026-01-13,13,1.74,0.0,2.0,1.25,True,frp
+ISR,Israel,376,2026-01-14,14,1.44,0.0,2.0,1.26,True,frp
+JOR,Jordan,400,2026-01-01,1,0.73,0.0,2.12,0.36,False,frp
+JOR,Jordan,400,2026-01-02,2,0.71,0.0,2.1,0.36,False,frp
+JOR,Jordan,400,2026-01-03,3,0.92,0.0,2.1,0.31,False,frp
+JOR,Jordan,400,2026-01-04,4,0.96,0.0,2.14,0.35,False,frp
+JOR,Jordan,400,2026-01-05,5,1.12,0.0,2.14,0.33,False,frp
+JOR,Jordan,400,2026-01-06,6,1.19,0.0,2.12,0.44,True,frp
+JOR,Jordan,400,2026-01-07,7,1.18,0.0,1.18,0.7,True,frp
+JOR,Jordan,400,2026-01-08,8,0.62,0.0,0.66,0.7,False,frp
+JOR,Jordan,400,2026-01-09,9,0.64,0.0,0.66,0.69,False,frp
+JOR,Jordan,400,2026-01-10,10,0.82,0.0,1.67,0.66,False,frp
+JOR,Jordan,400,2026-01-11,11,0.86,0.0,1.21,0.82,False,frp
+JOR,Jordan,400,2026-01-12,12,0.85,0.0,1.26,0.79,False,frp
+JOR,Jordan,400,2026-01-13,13,0.85,0.0,1.21,0.8,False,frp
+JOR,Jordan,400,2026-01-14,14,0.83,0.0,1.65,0.87,False,frp
+PSX,Palestine,275,2026-01-01,1,0.64,0.0,0.64,2.1,True,frp
+PSX,Palestine,275,2026-01-02,2,0.53,0.0,0.53,1.94,True,frp
+PSX,Palestine,275,2026-01-03,3,0.69,0.0,0.69,1.89,True,frp
+PSX,Palestine,275,2026-01-04,4,0.69,0.0,0.69,1.88,True,frp
+PSX,Palestine,275,2026-01-05,5,0.49,0.0,0.49,1.84,True,frp
+PSX,Palestine,275,2026-01-06,6,0.84,0.0,0.84,1.88,True,frp
+PSX,Palestine,275,2026-01-07,7,0.55,0.0,0.55,1.8,True,frp
+PSX,Palestine,275,2026-01-08,8,0.32,0.0,0.8,1.76,True,frp
+PSX,Palestine,275,2026-01-09,9,0.33,0.0,0.8,1.75,True,frp
+PSX,Palestine,275,2026-01-10,10,0.42,0.0,0.8,1.76,True,frp
+PSX,Palestine,275,2026-01-11,11,0.42,0.0,0.42,1.65,True,frp
+PSX,Palestine,275,2026-01-12,12,0.41,0.0,0.41,1.47,True,frp
+PSX,Palestine,275,2026-01-13,13,0.5,0.0,0.5,1.31,True,frp
+PSX,Palestine,275,2026-01-14,14,0.64,0.0,0.64,1.11,True,frp
+SAU,Saudi Arabia,682,2026-01-01,1,1.5,0.0,5.03,1.62,False,frp
+SAU,Saudi Arabia,682,2026-01-02,2,1.32,0.0,2.96,1.8,False,frp
+SAU,Saudi Arabia,682,2026-01-03,3,1.65,0.0,2.96,1.9,False,frp
+SAU,Saudi Arabia,682,2026-01-04,4,1.65,0.0,2.92,1.83,False,frp
+SAU,Saudi Arabia,682,2026-01-05,5,1.64,0.0,2.92,1.85,False,frp
+SAU,Saudi Arabia,682,2026-01-06,6,1.64,0.0,2.92,1.9,False,frp
+SAU,Saudi Arabia,682,2026-01-07,7,1.65,0.0,2.92,1.87,False,frp
+SAU,Saudi Arabia,682,2026-01-08,8,1.45,0.0,2.92,1.98,False,frp
+SAU,Saudi Arabia,682,2026-01-09,9,1.73,0.0,2.92,1.75,False,frp
+SAU,Saudi Arabia,682,2026-01-10,10,1.96,0.0,5.02,1.68,False,frp
+SAU,Saudi Arabia,682,2026-01-11,11,1.96,0.0,5.02,1.69,False,frp
+SAU,Saudi Arabia,682,2026-01-12,12,2.09,0.0,5.02,1.65,False,frp
+SAU,Saudi Arabia,682,2026-01-13,13,1.95,0.0,5.02,1.69,False,frp
+SAU,Saudi Arabia,682,2026-01-14,14,1.81,0.0,2.92,2.06,False,frp

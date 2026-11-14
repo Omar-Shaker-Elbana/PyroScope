@@ -1,46 +1,67 @@
 {
   "target": "frp",
   "test_start": "2025-01-01",
-  "countries": 2,
-  "test_rows": 3328,
+  "countries": 5,
+  "test_rows": 8320,
   "overall": {
     "model": {
-      "MAE": 69.78381841196202,
-      "RMSE": 171.46397008077918,
-      "corr": 0.6135078220016961
+      "MAE": 32.28187737006659,
+      "RMSE": 108.71230414671312,
+      "corr": 0.6882783428709414
     },
     "persistence_baseline": {
-      "MAE": 91.30587005615234,
-      "RMSE": 258.44403076171875,
-      "corr": 0.36638657532692737
+      "MAE": 41.480098724365234,
+      "RMSE": 164.86097717285156,
+      "corr": 0.4484390587468641
     },
     "same_season_baseline": {
-      "MAE": 77.71266174316406,
-      "RMSE": 173.51504516601562,
-      "corr": 0.6222128114273913
+      "MAE": 36.6236572265625,
+      "RMSE": 111.55364227294922,
+      "corr": 0.6875279248256113
     }
   },
-  "interval_80pct_coverage": 0.9296875,
+  "interval_80pct_coverage": 0.8900240384615384,
   "by_country": [
     {
       "country": "EGY",
       "name": "Egypt",
-      "MAE_model": 139.40152883801952,
-      "MAE_same_season": 154.65875244140625,
-      "mean_actual": 239.20361328125
+      "MAE_model": 137.56082257215888,
+      "MAE_same_season": 157.62245178222656,
+      "mean_actual": 241.5679473876953
+    },
+    {
+      "country": "SAU",
+      "name": "Saudi Arabia",
+      "MAE_model": 8.150353099648243,
+      "MAE_same_season": 10.69384765625,
+      "mean_actual": 7.095466136932373
+    },
+    {
+      "country": "ISR",
+      "name": "Israel",
+      "MAE_model": 8.691920303920991,
+      "MAE_same_season": 8.196406364440918,
+      "mean_actual": 4.104554653167725
     },
     {
       "country": "PSX",
       "name": "Palestine",
-      "MAE_model": 0.1661079859045298,
-      "MAE_same_season": 0.7665817737579346,
-      "mean_actual": 0.03144831955432892
+      "MAE_model": 4.4268800835854245,
+      "MAE_same_season": 4.263625144958496,
+      "mean_actual": 2.308295726776123
+    },
+    {
+      "country": "JOR",
+      "name": "Jordan",
+      "MAE_model": 2.579410791019403,
+      "MAE_same_season": 2.3419575691223145,
+      "mean_actual": 1.989886999130249
     }
   ],
   "harmonization": {
     "source": "core.src.harmonize (per-satellite, trust-graded calendar)",
     "k_by_modis_satellite": {
-      "Aqua": 0.8280049905409793,
+      "Aqua": 0.8205966444092001,
       "Terra": null
     },
     "scale_basis": {
@@ -4072,7 +4093,7 @@
       "2025-12-30": "reference",
       "2025-12-31": "reference"
     },
-    "kM": 0.8280049905409793,
+    "kM": 0.8205966444092001,
     "kV": 1.0
   }
 }

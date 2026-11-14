@@ -1,5 +1,5 @@
 {
-  "summary": "4 episode(s): 3 ROBUST, 1 MODERATE; 20 low-flag days (0 next to an unobserved day); without a seasonal baseline the same analysis would find 7 episode(s)",
+  "summary": "4 episode(s): 2 ROBUST, 1 FRAGILE, 1 MODERATE; 16 low-flag days (0 next to an unobserved day); without a seasonal baseline the same analysis would find 5 episode(s)",
   "definitions": {
     "event_overlap_padding_days": 2,
     "robust_fraction": 0.8,
@@ -20,36 +20,36 @@
   },
   "seasonality": {
     "monthly_median_z": {
-      "1": 0.0018836575381706293,
-      "2": 0.020559898608088698,
-      "3": -0.01809417706123554,
-      "4": 0.06034508897752504,
-      "5": 0.03273232624191061,
-      "6": 0.02979258455761644,
-      "7": 0.023258150003599105,
-      "8": 0.022129525545546626,
-      "9": -0.02120389809251788,
-      "10": -0.006025379076824878,
-      "11": -0.02768961033903959,
-      "12": -0.00818102183169413
+      "1": 0.006756796065545155,
+      "2": 0.04100230772852127,
+      "3": -0.024975566577734205,
+      "4": 0.04296343404872728,
+      "5": 0.002212813003436419,
+      "6": 0.021173023677403938,
+      "7": 0.03797324629236968,
+      "8": 0.017665725510777244,
+      "9": -0.011514974835284632,
+      "10": -0.002367290925820189,
+      "11": -0.015121862321145665,
+      "12": 0.006456796734621499
     },
     "monthly_robust_sd_z": {
-      "1": 1.0678646305046386,
-      "2": 1.038874664876586,
-      "3": 1.0586134110701466,
-      "4": 0.967097037020184,
-      "5": 1.0406177911224306,
-      "6": 1.0435903528674433,
-      "7": 1.0032129346849339,
-      "8": 1.0230529614263248,
-      "9": 1.0899269362047617,
-      "10": 1.038279189279464,
-      "11": 1.0143030440256282,
-      "12": 1.052513400264036
+      "1": 1.0363891925053714,
+      "2": 1.0220639065448474,
+      "3": 1.05881476585467,
+      "4": 0.9907930394898934,
+      "5": 1.031136485799005,
+      "6": 1.039799183741272,
+      "7": 1.0037228173254031,
+      "8": 1.0284256312818307,
+      "9": 1.0954836971801525,
+      "10": 1.0634638941835663,
+      "11": 1.0147865060656072,
+      "12": 1.0486276240487502
     },
-    "max_abs_monthly_median_z": 0.06034508897752504,
-    "kruskal_wallis_p_location": 0.8054381492773625,
-    "brown_forsythe_p_scale": 0.7297451659584105,
+    "max_abs_monthly_median_z": 0.04296343404872728,
+    "kruskal_wallis_p_location": 0.6730337215059331,
+    "brown_forsythe_p_scale": 0.9855033671462371,
     "reading": "monthly median z close to 0 and robust SD close to 1 mean the seasonal cycle is removed; with ~4000 days the tests detect tiny departures, so judge the effect sizes (max_abs_monthly_median_z).",
     "highest_climatology_months": [
       9,
@@ -57,8 +57,8 @@
       10
     ],
     "high_flags_in_peak_months": {
-      "seasonal_baseline": 0.4090909090909091,
-      "no_seasonal_baseline_control": 0.6785714285714286
+      "seasonal_baseline": 0.35,
+      "no_seasonal_baseline_control": 0.6153846153846154
     },
     "high_days_by_month": {
       "seasonal_baseline": {
@@ -67,11 +67,11 @@
         "3": 0,
         "4": 0,
         "5": 3,
-        "6": 9,
-        "7": 2,
-        "8": 1,
-        "9": 3,
-        "10": 3,
+        "6": 8,
+        "7": 1,
+        "8": 3,
+        "9": 2,
+        "10": 2,
         "11": 0,
         "12": 0
       },
@@ -81,81 +81,81 @@
         "3": 0,
         "4": 0,
         "5": 12,
-        "6": 8,
+        "6": 7,
         "7": 1,
-        "8": 0,
-        "9": 3,
-        "10": 4,
+        "8": 2,
+        "9": 1,
+        "10": 3,
         "11": 0,
         "12": 0
       }
     },
-    "episodes_without_seasonal_baseline": 7
+    "episodes_without_seasonal_baseline": 5
   },
   "extreme_values": {
     "sd_over_robust_sigma": {
-      "median": 1.0347764008716882,
-      "p90": 1.1696639881370126,
-      "max": 1.512105561503568
+      "median": 1.0373066746914241,
+      "p90": 1.1484232282711406,
+      "max": 1.4516376603792593
     },
     "mean_minus_median_in_robust_sigma": {
-      "median": -0.03860469007721428,
-      "p10": -0.1244065427167163,
-      "p90": 0.07315076007674463
+      "median": -0.03087684647480295,
+      "p10": -0.13306218942671702,
+      "p90": 0.07603123496876747
     },
     "reading": "a ratio above 1 means the classical SD of the same-season pool is inflated by extreme values, which makes a classical z-score LESS sensitive; a mean far from the median means the extremes also move the centre. The production z uses median / MAD, so it is not affected."
   },
   "missing_observations": {
     "days_by_status": {
-      "measured": 3942,
-      "measured_low_coverage": 37,
+      "measured": 3944,
       "viirs_not_observed": 36,
+      "measured_low_coverage": 35,
       "partial_day": 2
     },
     "scored_days_that_are_not_valid": 0,
-    "low_flags": 20,
+    "low_flags": 16,
     "low_flags_next_to_an_unobserved_day": 0,
     "low_flags_on_genuine_zero_days": 0,
-    "low_flags_if_outage_suspect_days_were_kept": 39,
-    "of_which_on_outage_suspect_days": 22,
-    "share_of_low_flags_explained_by_outage_suspect_days": 0.5641025641025641,
-    "high_flags_if_outage_suspect_days_were_kept": 21,
-    "high_flags_production": 22,
+    "low_flags_if_outage_suspect_days_were_kept": 36,
+    "of_which_on_outage_suspect_days": 23,
+    "share_of_low_flags_explained_by_outage_suspect_days": 0.6388888888888888,
+    "high_flags_if_outage_suspect_days_were_kept": 20,
+    "high_flags_production": 20,
     "reading": "missing days are NaN (never zero) and cannot be scored; a day that lost overpasses is biased low and would be flagged as a 'low' anomaly, so such days are excluded from the production analysis. Missing observations cannot create a high anomaly; they can only make the baseline slightly noisier (see thinning_experiments)."
   },
   "thinning_experiments": {
     "random 10% of days lost": {
       "replicates": 30,
       "detection_rate_per_event": [
+        0.7666666666666667,
         1.0,
-        1.0,
-        1.0,
-        0.5666666666666667
+        0.9666666666666667,
+        0.7
       ],
-      "new_episodes_per_record_mean": 0.16666666666666666,
-      "records_with_any_new_episode": 0.16666666666666666
+      "new_episodes_per_record_mean": 0.06666666666666667,
+      "records_with_any_new_episode": 0.06666666666666667
     },
     "random 25% of days lost": {
       "replicates": 30,
       "detection_rate_per_event": [
-        0.8666666666666667,
+        0.6666666666666666,
         1.0,
-        1.0,
+        0.9,
         0.6666666666666666
       ],
-      "new_episodes_per_record_mean": 0.23333333333333334,
-      "records_with_any_new_episode": 0.23333333333333334
+      "new_episodes_per_record_mean": 0.2,
+      "records_with_any_new_episode": 0.2
     },
     "three random 15-day outages per year": {
       "replicates": 30,
       "detection_rate_per_event": [
-        0.9333333333333333,
+        0.6333333333333333,
         1.0,
-        1.0,
-        0.6
+        0.8666666666666667,
+        0.7333333333333333
       ],
-      "new_episodes_per_record_mean": 0.26666666666666666,
-      "records_with_any_new_episode": 0.26666666666666666
+      "new_episodes_per_record_mean": 0.36666666666666664,
+      "records_with_any_new_episode": 0.3
     }
   },
   "annual_level_trend": {
@@ -172,102 +172,102 @@
       2024,
       2025
     ],
-    "kendall_tau": -0.7090909090909091,
-    "p": 0.0015912097162097162,
-    "theil_sen_log_change_per_year": -0.05488427597120715,
-    "relative_change_per_year": -0.05340531463406927,
+    "kendall_tau": -0.7818181818181819,
+    "p": 0.0003334435626102293,
+    "theil_sen_log_change_per_year": -0.05743846771567327,
+    "relative_change_per_year": -0.055820013849615276,
     "reading": "a significant trend means the leave-one-year-out baseline mixes different activity levels; the 'annual level removed' variant checks that this does not create or hide episodes."
   },
   "null_model": {
     "null_parameters": {
-      "centre": -0.006559284323006783,
-      "scale": 1.0305180266240181,
+      "centre": -0.001291489194178758,
+      "scale": 1.0318279533958943,
       "student_t": {
-        "df": 13.672566591449748,
-        "loc": -0.04347452794892544,
-        "scale": 0.9918529081435945
+        "df": 13.279153304935708,
+        "loc": -0.04069112497448049,
+        "scale": 0.9905596099794636
       },
-      "lag1_autocorrelation": 0.31749139949000915,
-      "non_event_days": 3893,
+      "lag1_autocorrelation": 0.3088537850527572,
+      "non_event_days": 3900,
       "simulated_records": 2000
     },
     "tail_counts": [
       {
         "z_threshold": 2.0,
         "observed_days": 106,
-        "expected_gaussian_null": 101.54270666468767,
-        "expected_t_null": 116.16252827589668,
-        "false_discovery_proportion_gaussian": 0.957950062874412,
+        "expected_gaussian_null": 103.39841401924785,
+        "expected_t_null": 117.42117848638814,
+        "false_discovery_proportion_gaussian": 0.9754567360306401,
         "false_discovery_proportion_t": 1.0
       },
       {
         "z_threshold": 2.5,
-        "observed_days": 48,
-        "expected_gaussian_null": 29.569054893930993,
-        "expected_t_null": 44.960009236115916,
-        "false_discovery_proportion_gaussian": 0.6160219769568956,
-        "false_discovery_proportion_t": 0.9366668590857482
+        "observed_days": 43,
+        "expected_gaussian_null": 30.26004315351366,
+        "expected_t_null": 45.76168285651616,
+        "false_discovery_proportion_gaussian": 0.7037219338026433,
+        "false_discovery_proportion_t": 1.0
       },
       {
         "z_threshold": 3.0,
-        "observed_days": 22,
-        "expected_gaussian_null": 6.954170137291921,
-        "expected_t_null": 16.821256433341023,
-        "false_discovery_proportion_gaussian": 0.31609864260417825,
-        "false_discovery_proportion_t": 0.7646025651518648
+        "observed_days": 20,
+        "expected_gaussian_null": 7.156777226843548,
+        "expected_t_null": 17.284962226547435,
+        "false_discovery_proportion_gaussian": 0.3578388613421774,
+        "false_discovery_proportion_t": 0.8642481113273718
       },
       {
         "z_threshold": 3.5,
-        "observed_days": 12,
-        "expected_gaussian_null": 1.3150473589913583,
-        "expected_t_null": 6.240081302365365,
-        "false_discovery_proportion_gaussian": 0.10958727991594652,
-        "false_discovery_proportion_t": 0.5200067751971137
+        "observed_days": 11,
+        "expected_gaussian_null": 1.3618332793641421,
+        "expected_t_null": 6.488638051654394,
+        "false_discovery_proportion_gaussian": 0.1238030253967402,
+        "false_discovery_proportion_t": 0.5898761865140357
       },
       {
         "z_threshold": 4.0,
-        "observed_days": 4,
-        "expected_gaussian_null": 0.19929161980736879,
-        "expected_t_null": 2.337322404529717,
-        "false_discovery_proportion_gaussian": 0.049822904951842197,
-        "false_discovery_proportion_t": 0.5843306011324293
+        "observed_days": 6,
+        "expected_gaussian_null": 0.2078021201493496,
+        "expected_t_null": 2.4641308500205903,
+        "false_discovery_proportion_gaussian": 0.034633686691558266,
+        "false_discovery_proportion_t": 0.4106884750034317
       }
     ],
     "episodes": {
       "observed": 4,
       "expected_per_record_gaussian": 0.6115,
-      "expected_per_record_t": 1.3525,
-      "p_at_least_observed_count_gaussian": 0.00399800099950025,
-      "p_at_least_observed_count_t": 0.05647176411794103
+      "expected_per_record_t": 1.339,
+      "p_at_least_observed_count_gaussian": 0.004997501249375313,
+      "p_at_least_observed_count_t": 0.05147426286856572
     },
     "per_event": [
       {
         "event_id": "E1",
-        "span_days": 12,
-        "peak_z": 3.1185740338107255,
-        "p_family_gaussian": 0.0004997501249375312,
-        "p_family_t": 0.0004997501249375312
+        "span_days": 6,
+        "peak_z": 3.2475945999865954,
+        "p_family_gaussian": 0.04997501249375312,
+        "p_family_t": 0.13993003498250875
       },
       {
         "event_id": "E2",
         "span_days": 5,
-        "peak_z": 4.209337169487471,
-        "p_family_gaussian": 0.00399800099950025,
-        "p_family_t": 0.07546226886556721
+        "peak_z": 3.784470329983171,
+        "p_family_gaussian": 0.02048975512243878,
+        "p_family_t": 0.15092453773113443
       },
       {
         "event_id": "E3",
         "span_days": 5,
-        "peak_z": 3.6335144127684096,
-        "p_family_gaussian": 0.034482758620689655,
-        "p_family_t": 0.18640679660169915
+        "peak_z": 3.6893302523441265,
+        "p_family_gaussian": 0.02798600699650175,
+        "p_family_t": 0.17191404297851073
       },
       {
         "event_id": "E4",
-        "span_days": 3,
-        "peak_z": 3.6237624453609074,
-        "p_family_gaussian": 0.10494752623688156,
-        "p_family_t": 0.4387806096951524
+        "span_days": 4,
+        "peak_z": 3.5624179714121187,
+        "p_family_gaussian": 0.06996501749125437,
+        "p_family_t": 0.3103448275862069
       }
     ],
     "reading": "p_family = chance that a record of this length and gap pattern contains an episode at least this long and this high by ordinary variability alone. It is an order-of-magnitude screen under a stationary model, not a significance claim about fire regimes."
@@ -276,26 +276,26 @@
     {
       "event_id": "E1",
       "start": "2016-09-27",
-      "end": "2016-10-08",
-      "duration_days": 12,
-      "peak_date": "2016-10-07",
-      "peak_z": 3.1185740338107255,
-      "total_frp_mw": 11049.190000000002,
-      "excess_frp_mw": 7274.803400978499,
+      "end": "2016-10-02",
+      "duration_days": 6,
+      "peak_date": "2016-09-30",
+      "peak_z": 3.2475945999865954,
+      "total_frp_mw": 5321.11,
+      "excess_frp_mw": 3348.85,
       "variants_testable": 8,
-      "variants_detected": 7,
-      "detected_fraction": 0.875,
-      "thinning_detection_rate": 0.9333333333333332,
-      "robustness": "ROBUST",
-      "detected_by_classical_z": true,
-      "peak_z_min_over_variants": 2.625628631509129,
-      "peak_z_median_over_variants": 3.1312802768697665,
+      "variants_detected": 3,
+      "detected_fraction": 0.375,
+      "thinning_detection_rate": 0.6888888888888888,
+      "robustness": "FRAGILE",
+      "detected_by_classical_z": false,
+      "peak_z_min_over_variants": 2.3313680290100813,
+      "peak_z_median_over_variants": 3.018155805002152,
       "peak_pool_percentile": 1.0,
-      "peak_pool_n": 149,
+      "peak_pool_n": 147,
       "peak_exceeds_all_pool": true,
-      "null_p_family_t": 0.0004997501249375312,
-      "null_p_family_gaussian": 0.0004997501249375312,
-      "assessment": "ROBUST: detected in 7/8 consensus variants and 93% of data-loss replicates; also found by the classical z; peak day above 100.0% of 149 same-season values of other years (a new maximum); family-wise p under the heavy-tailed null 0.000. Statistical candidate only."
+      "null_p_family_t": 0.13993003498250875,
+      "null_p_family_gaussian": 0.04997501249375312,
+      "assessment": "FRAGILE: detected in 3/8 consensus variants and 69% of data-loss replicates; NOT found by the classical z; peak day above 100.0% of 147 same-season values of other years (a new maximum); family-wise p under the heavy-tailed null 0.140. Statistical candidate only."
     },
     {
       "event_id": "E2",
@@ -303,23 +303,23 @@
       "end": "2022-06-27",
       "duration_days": 5,
       "peak_date": "2022-06-25",
-      "peak_z": 4.209337169487471,
-      "total_frp_mw": 4744.1900000000005,
-      "excess_frp_mw": 3419.3924129240077,
+      "peak_z": 3.784470329983171,
+      "total_frp_mw": 4842.85004,
+      "excess_frp_mw": 3381.6146517711286,
       "variants_testable": 9,
       "variants_detected": 9,
       "detected_fraction": 1.0,
       "thinning_detection_rate": 1.0,
       "robustness": "ROBUST",
       "detected_by_classical_z": true,
-      "peak_z_min_over_variants": 3.2048137816629505,
-      "peak_z_median_over_variants": 4.272646517623441,
+      "peak_z_min_over_variants": 3.279217294137271,
+      "peak_z_median_over_variants": 3.8873119386381325,
       "peak_pool_percentile": 1.0,
       "peak_pool_n": 150,
       "peak_exceeds_all_pool": true,
-      "null_p_family_t": 0.07546226886556721,
-      "null_p_family_gaussian": 0.00399800099950025,
-      "assessment": "ROBUST: detected in 9/9 consensus variants and 100% of data-loss replicates; also found by the classical z; peak day above 100.0% of 150 same-season values of other years (a new maximum); family-wise p under the heavy-tailed null 0.075. Statistical candidate only."
+      "null_p_family_t": 0.15092453773113443,
+      "null_p_family_gaussian": 0.02048975512243878,
+      "assessment": "ROBUST: detected in 9/9 consensus variants and 100% of data-loss replicates; also found by the classical z; peak day above 100.0% of 150 same-season values of other years (a new maximum); family-wise p under the heavy-tailed null 0.151. Statistical candidate only."
     },
     {
       "event_id": "E3",
@@ -327,47 +327,47 @@
       "end": "2023-06-21",
       "duration_days": 5,
       "peak_date": "2023-06-17",
-      "peak_z": 3.6335144127684096,
-      "total_frp_mw": 4092.2299999999996,
-      "excess_frp_mw": 2761.026649586167,
+      "peak_z": 3.6893302523441265,
+      "total_frp_mw": 4156.39,
+      "excess_frp_mw": 2707.185423393309,
       "variants_testable": 9,
-      "variants_detected": 9,
-      "detected_fraction": 1.0,
-      "thinning_detection_rate": 1.0,
+      "variants_detected": 8,
+      "detected_fraction": 0.8888888888888888,
+      "thinning_detection_rate": 0.9111111111111111,
       "robustness": "ROBUST",
       "detected_by_classical_z": false,
-      "peak_z_min_over_variants": 2.8759964833409977,
-      "peak_z_median_over_variants": 3.6315742606782617,
+      "peak_z_min_over_variants": 2.8473769795012807,
+      "peak_z_median_over_variants": 3.6082015429264165,
       "peak_pool_percentile": 0.98,
       "peak_pool_n": 150,
       "peak_exceeds_all_pool": false,
-      "null_p_family_t": 0.18640679660169915,
-      "null_p_family_gaussian": 0.034482758620689655,
-      "assessment": "ROBUST: detected in 9/9 consensus variants and 100% of data-loss replicates; NOT found by the classical z; peak day above 98.0% of 150 same-season values of other years; family-wise p under the heavy-tailed null 0.186. Statistical candidate only."
+      "null_p_family_t": 0.17191404297851073,
+      "null_p_family_gaussian": 0.02798600699650175,
+      "assessment": "ROBUST: detected in 8/9 consensus variants and 91% of data-loss replicates; NOT found by the classical z; peak day above 98.0% of 150 same-season values of other years; family-wise p under the heavy-tailed null 0.172. Statistical candidate only."
     },
     {
       "event_id": "E4",
-      "start": "2023-10-20",
+      "start": "2023-10-19",
       "end": "2023-10-22",
-      "duration_days": 3,
+      "duration_days": 4,
       "peak_date": "2023-10-21",
-      "peak_z": 3.6237624453609074,
-      "total_frp_mw": 2731.16,
-      "excess_frp_mw": 2007.1536897543651,
+      "peak_z": 3.5624179714121187,
+      "total_frp_mw": 3529.0,
+      "excess_frp_mw": 2489.489476685794,
       "variants_testable": 9,
-      "variants_detected": 5,
-      "detected_fraction": 0.5555555555555556,
-      "thinning_detection_rate": 0.6111111111111112,
+      "variants_detected": 6,
+      "detected_fraction": 0.6666666666666666,
+      "thinning_detection_rate": 0.7000000000000001,
       "robustness": "MODERATE",
       "detected_by_classical_z": false,
-      "peak_z_min_over_variants": 2.6198497371837286,
-      "peak_z_median_over_variants": 3.4769363191507003,
+      "peak_z_min_over_variants": 2.4596591205025176,
+      "peak_z_median_over_variants": 3.4573188077895876,
       "peak_pool_percentile": 1.0,
       "peak_pool_n": 150,
       "peak_exceeds_all_pool": true,
-      "null_p_family_t": 0.4387806096951524,
-      "null_p_family_gaussian": 0.10494752623688156,
-      "assessment": "MODERATE: detected in 5/9 consensus variants and 61% of data-loss replicates; NOT found by the classical z; peak day above 100.0% of 150 same-season values of other years (a new maximum); family-wise p under the heavy-tailed null 0.439. Statistical candidate only."
+      "null_p_family_t": 0.3103448275862069,
+      "null_p_family_gaussian": 0.06996501749125437,
+      "assessment": "MODERATE: detected in 6/9 consensus variants and 70% of data-loss replicates; NOT found by the classical z; peak day above 100.0% of 150 same-season values of other years (a new maximum); family-wise p under the heavy-tailed null 0.310. Statistical candidate only."
     }
   ]
 }
