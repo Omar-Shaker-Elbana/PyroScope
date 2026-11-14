@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "ingestion",
     "forecast",
     "validation",
+    "dashboard",
 ]
 
 MIDDLEWARE = [
