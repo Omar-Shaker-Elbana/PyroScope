@@ -1,0 +1,8 @@
+<h1>Harmonization status</h1>
+{% if frp_mapping %}
+  <p>kM={{ frp_mapping.kM }} kV={{ frp_mapping.kV }}</p>
+  <p>(Placeholder — swap for the real per-satellite k_trust table from
+  frp_mapping.json.modis_satellites once the ingestion app's layout is designed.)</p>
+{% else %}
+  <p>No harmonization run yet. Run: python manage.py preprocess && python manage.py harmonize</p>
+{% endif %}

@@ -1,0 +1,361 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 98f11a3..6c7eb0b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,22 @@
+ Backend only (no frontend work). Evidence and reasoning: `docs/METHODOLOGY.md`. A unified diff against
+ `pyroscope_modis_viirs_not_final.zip` is in `docs/CHANGES_vs_not_final.patch`.
+ 
++## Follow-up: J1/NOAA-20 time gap and single-day demo (found while testing the FIRMS 24h NRT files)
++
++* **k window.** Aqua and NOAA-20 (J1) VIIRS pass ~50 min apart, so the fixed 30-minute k window left every MODIS satellite
++  without a k and the whole harmonized series NaN. `PYRO_K_MAX_DT_MIN` now defaults to `auto`: 30 minutes, widened to the
++  first of `PYRO_K_WIDEN_STEPS` (45, 60, 75, 90) that gives >= `PYRO_MIN_PAIRS` pixels in >= 10 cells, and ONLY when 30
++  does not. A widened window is written to `frp_mapping.json` (`scale_policy.k_window`) and a widened k can never be
++  graded HIGH (the reason is added to `k_trust_problems`). Where 30 minutes already works the output is unchanged; a
++  number in `PYRO_K_MAX_DT_MIN` fixes the window exactly as before. Works in the in-memory and the disk-backed path.
++* **Single-day demo.** `PYRO_SINGLE_DAY_DEMO=1`: a day only partly covered by the input (a 24h NRT file never covers a
++  UTC day) gets `harmonized_status = demo_partial_window` and its VIIRS total as a lower-bound `harmonized_frp_mw_viirs_equiv`,
++  instead of `partial_day` / NaN. `harmonized_is_measured` stays False, `anomaly.py` never scores it, and a console
++  summary says so. Off by default; the other statuses are untouched.
++* Minor: no divide-by-zero warning in `per_year_fits` when a standard error is 0; the console "first / last rows" listing
++  no longer prints a short calendar twice.
++* `selftest.py`: `check_k_window_and_demo`.
++
+ ## Follow-up: external burned-area validation (review point 7)
+ 
+ * New `src/external_validation.py`: optional event-level comparison with MODIS MCD64A1 Collection 6.1. It uses the
+diff --git a/README.md b/README.md
+index 418073c..4128b92 100644
+--- a/README.md
++++ b/README.md
+@@ -97,6 +97,18 @@ Outputs in `data/processed/`: `calendar_daily.csv`, `calendar_cells.csv` (cell-d
+ 
+ **Cloud-obscured days (optional, `PYRO_CLOUD_FILE`).** A satellite can pass over and see nothing because cloud hides the ground; FIRMS files carry no cloud information, so an observed day with 0 detections used to be read as "no fire". Give `harmonize` a CSV with one row per UTC day (columns `date` and `clear_fraction`, the share of your area of interest that was clear, 0-1; `cloud_fraction`, `clear_percent` and `cloud_percent` also work; an optional `satellite` column restricts a row to one satellite) and an observed day with **0 detections and a clear share below `PYRO_CLOUD_MIN_CLEAR` (default 0.5)** becomes `harmonized_status = observed_obscured`: harmonized value `NaN`, never scored by `anomaly`. A day that is not in the file has unknown cloud cover and keeps its old status; it is never treated as clear. Days with detections keep their status and are only flagged (`viirs_cloud_limited`); `PYRO_CLOUD_OBSCURE_NONZERO=1` also marks them `observed_obscured`. The calendar gains `viirs_clear_fraction` and `viirs_cloud_limited`, and `frp_mapping.json` gains a `cloud_obscuration` block (days covered, days marked, warnings). Without `PYRO_CLOUD_FILE` nothing changes. Build the file by averaging, per UTC day, the clear share of a cloud-mask product (e.g. MOD35 / MYD35, or a VIIRS cloud mask) clipped to the same area as your fire data (`cloud_mask.clear_share_from_mod35` decodes the MOD35 `Cloud_Mask` byte); check it first with `python -m src.cloud_mask your_file.csv`. Details: `docs/METHODOLOGY.md` section 2.5.
+ 
++**Why the harmonized series is VIIRS-referenced, and where MODIS enters.** The harmonized record is expressed on the VIIRS 375 m scale on purpose. A merged MODIS+VIIRS series needs one sensor's value to stand in for the other on days one is missing, and the data do not support that here: on the shipped Egypt data VIIRS totals are ~9x the k-scaled Aqua totals and correlate weakly with them (`daily_total_relationship`), because k is a ratio conditional on a MODIS detection and cannot recover the many small fires only VIIRS sees. MODIS therefore contributes four things, none of them a silent substitution: (1) the footprint-matched pixel table (`matched_pairs.csv`); (2) the per-satellite scale k with its CI, prediction interval and trust grade, i.e. the quantitative bridge between the two records; (3) MODIS expressed on the VIIRS scale with uncertainty (`modis_frp_viirs_equiv_mw`, `_lo_mw`, `_hi_mw`), so the pre-VIIRS / MODIS-only record can be read on the same axis; (4) `modis_only_evidence` on days VIIRS did not observe. Terra has no k against an afternoon VIIRS reference (~150 min apart) and so adds only detection counts; `PYRO_APPLY_UNVALIDATED_K=1` applies an unvalidated k and labels every value.
++
++**Time-gap window of k (J1 / NOAA-20).** `PYRO_K_MAX_DT_MIN` defaults to `auto`: matches within 30 minutes are used, and only if no MODIS satellite has enough of them the window is widened to 45, 60, 75 or 90 minutes (`PYRO_K_WIDEN_STEPS`). Aqua vs NOAA-20 is ~50 minutes apart, so with the J1 file you will see `k window: ... widened to 60 min`. A widened k is capped below HIGH trust and recorded in `frp_mapping.json` (`scale_policy.k_window`); part of its ratio is fire evolution between the overpasses. Set a number to fix the window.
++
++**Single-day demo (FIRMS 24h files).** The global 24h NRT files never cover a full UTC day, so by default their one day is `partial_day` with no harmonized value. For a demo run
++
++```bash
++PYRO_SINGLE_DAY_DEMO=1 python -m src.harmonize
++```
++
++The partial day becomes `demo_partial_window` with the VIIRS total (a lower bound) and a printed summary of VIIRS vs MODIS-on-the-VIIRS-scale totals and k. It is a pipeline demonstration, never a validated record, and `anomaly` ignores it.
++
+ **Spatial grid.** Matching, k and every daily FRP total use native pixels and do not depend on the 0.5 degree grid; the grid is used for the bootstrap clusters, the active-cell counts, the cell-level correlations and `calendar_cells.csv`. `grid_sensitivity.csv` re-computes those quantities for several cell sizes; see `docs/METHODOLOGY.md`, section 4, for why 0.5 degrees, what it loses, and how to read the cell metrics (they are properties of the grid; quote them with `cell_deg`).
+ 
+ Limits: 24h NRT files only demonstrate the pipeline. A usable calendar needs years of archive data.
+diff --git a/src/config.py b/src/config.py
+index f276917..2f923b2 100644
+--- a/src/config.py
++++ b/src/config.py
+@@ -39,7 +39,18 @@ MIN_PAIRS_FIT = int(os.getenv("PYRO_MIN_PAIRS", 50))     # fewer matched pixels
+ 
+ # --- Multi-year runs / trustworthy k (preprocess.py, harmonize.py) ---
+ # k is fitted only on matched pixels whose median |time gap| is at most this many minutes.
+-K_FIT_MAX_DT_MIN = float(os.getenv("PYRO_K_MAX_DT_MIN", 30))
++# PYRO_K_MAX_DT_MIN=<minutes> fixes the window. The default, "auto", starts at 30 minutes and widens it ONLY when no MODIS
++# satellite has enough matches inside it (typical: Aqua vs NOAA-20 / J1 VIIRS, ~50 min apart). A widened window is
++# written to frp_mapping.json (scale_policy.k_window) and caps k_trust below HIGH. When 30 minutes already works the
++# output is identical to a fixed 30-minute run.
++_kdt = (os.getenv("PYRO_K_MAX_DT_MIN") or "auto").strip().lower()
++K_FIT_AUTO_WIDEN = _kdt == "auto"
++K_FIT_MAX_DT_MIN = 30.0 if K_FIT_AUTO_WIDEN else float(_kdt)
++K_FIT_WIDEN_STEPS = tuple(float(x) for x in (os.getenv("PYRO_K_WIDEN_STEPS") or "45,60,75,90").split(","))
++# PYRO_SINGLE_DAY_DEMO=1: an input that covers less than one UTC day (e.g. the FIRMS 24h NRT files) gets its partial
++# day labelled `demo_partial_window` with the VIIRS total filled in, instead of a NaN `partial_day`. The value is a
++# lower bound for that day; the status is never scored by anomaly.py. Off by default.
++SINGLE_DAY_DEMO = os.getenv("PYRO_SINGLE_DAY_DEMO", "0") == "1"
+ # A k fitted on fewer close-in-time matched pixels than this can never be graded HIGH.
+ K_TRUST_MIN_PAIRS = int(os.getenv("PYRO_K_TRUST_PAIRS", 500))
+ # Large archives automatically switch to the disk-backed, day-batched harmonizer.
+diff --git a/src/harmonize.py b/src/harmonize.py
+index db82809..7afa4f3 100644
+--- a/src/harmonize.py
++++ b/src/harmonize.py
+@@ -40,7 +40,7 @@ from src import harmonize_validation as hv
+ from src import kmodel
+ from src.config import (
+     PROCESSED_DIR, BBOX, START_DATE, END_DATE, CELL_DEG, MATCH_MAX_MIN, DAY_TOL_MIN, MIN_PAIRS_FIT,
+-    K_FIT_MAX_DT_MIN, K_TRUST_MIN_PAIRS, REF_SAT, AOI_FILE, EXCLUDE_STATIC, OUT_OF_CORE, OUT_OF_CORE_ROWS,
++    K_FIT_MAX_DT_MIN, K_FIT_AUTO_WIDEN, K_FIT_WIDEN_STEPS, SINGLE_DAY_DEMO, K_TRUST_MIN_PAIRS, REF_SAT, AOI_FILE, EXCLUDE_STATIC, OUT_OF_CORE, OUT_OF_CORE_ROWS,
+     APPLY_UNVALIDATED_K, N_BOOT, K_TAU_MAX, GRID_SENS_DEG, COV_MIN_FRAC, COV_EXTREME_FRAC, COV_MIN_EXPECTED, COV_CLUSTER_GAP_MIN,
+     K_MODEL, K_MODEL_BOOT, K_MODEL_FOLDS, K_MODEL_CLIP_Q,
+     CLOUD_FILE, CLOUD_MIN_CLEAR, CLOUD_OBSCURE_NONZERO,
+@@ -265,8 +265,11 @@ def per_year_fits(use, rng):
+              "k_from_other_years_pred_over_actual": None, "loyo_z": None}
+         if len(ar) >= MIN_YEAR_CELLS:
+             k_r, _, _, se_r = ratio_ci(ar, rng, N_BOOT)
+-            d["k_from_other_years_pred_over_actual"] = float(k_r / k_y)
+-            d["loyo_z"] = float(np.log(k_r / k_y) / np.sqrt(se_y ** 2 + se_r ** 2))
++            if k_y > 0 and k_r > 0:
++                d["k_from_other_years_pred_over_actual"] = float(k_r / k_y)
++                den = float(np.sqrt(se_y ** 2 + se_r ** 2))
++                if den > 0:                      # a zero standard error gives no z (and no divide-by-zero warning)
++                    d["loyo_z"] = float(np.log(k_r / k_y) / den)
+         out[str(y)] = d
+     return out
+ 
+@@ -299,10 +302,52 @@ def k_trust_grade(use, k, ci, by_year, het):
+     if bad:
+         problems.append(f"k from the other years misses year(s) {bad} by more than sampling error "
+                         f"(|z| > {z_crit:.2f}, Bonferroni over {len(by_year)} years)")
++    if K_WINDOW_NOTE["widened"]:
++        problems.append(f"k fitted with the time-gap window widened from {K_WINDOW_NOTE['strict_min']:g} to "
++                        f"{K_WINDOW_NOTE['used_min']:g} min: part of the MODIS/VIIRS ratio is fire evolution between "
++                        f"the two overpasses, not sensor difference")
+     grade = "HIGH" if not problems else ("LOW" if len(use) < K_TRUST_MIN_PAIRS else "MEDIUM")
+     return grade, problems, n_days, ci_rel
+ 
+ 
++K_WINDOW_NOTE = {"widened": False, "strict_min": None, "used_min": None}
++
++
++def resolve_k_window(window_ok):
++    """Choose the time-gap window (minutes) inside which matched pixels are used to fit k.
++    window_ok(w) -> True when at least one MODIS satellite has >= MIN_PAIRS_FIT matched pixels in >= MIN_CELLS_FIT
++    cells with |dt| <= w. The configured window is kept whenever it works. Only if it does not, and PYRO_K_MAX_DT_MIN
++    is "auto", the smallest step of K_FIT_WIDEN_STEPS that works is used. The choice is recorded in K_WINDOW_NOTE
++    (-> frp_mapping.json) and a widened window can never be graded HIGH (k_trust_grade)."""
++    global K_FIT_MAX_DT_MIN
++    strict = float(K_FIT_MAX_DT_MIN)
++    K_WINDOW_NOTE.update(widened=False, strict_min=strict, used_min=strict)
++    if not K_FIT_AUTO_WIDEN or window_ok(strict):
++        return K_FIT_MAX_DT_MIN
++    for w in K_FIT_WIDEN_STEPS:
++        if w > strict and window_ok(float(w)):
++            K_FIT_MAX_DT_MIN = float(w)
++            K_WINDOW_NOTE.update(widened=True, used_min=float(w))
++            print(f"  k window: no MODIS satellite has enough matches within {strict:g} min of VIIRS; widened to "
++                  f"{w:g} min (k_trust cannot be HIGH; set PYRO_K_MAX_DT_MIN=<minutes> to fix the window)")
++            break
++    return K_FIT_MAX_DT_MIN
++
++
++def apply_single_day_demo(cal, ref_sat):
++    """PYRO_SINGLE_DAY_DEMO=1: a partial day on which the reference VIIRS satellite delivered data becomes
++    `demo_partial_window` with the VIIRS total as its harmonized value (a lower bound for that day). It is NOT a
++    measured day: harmonized_is_measured stays False and anomaly.py never scores it."""
++    if not SINGLE_DAY_DEMO:
++        return cal
++    demo = ((cal["harmonized_status"] == "partial_day") & cal["viirs_observed"] & cal["viirs_detections"].notna()).to_numpy()
++    if demo.any():
++        cal.loc[demo, "harmonized_status"] = "demo_partial_window"
++        cal.loc[demo, "harmonized_frp_mw_viirs_equiv"] = cal.loc[demo, "viirs_frp_mw"]
++        cal.loc[demo, "harmonized_source"] = f"VIIRS {ref_sat} (demo, partial window)"
++    return cal
++
++
+ def fit_scale(pairs, label=""):
+     """Constant aggregate scale k (VIIRS-equivalent FRP = k * MODIS FRP) for ONE MODIS satellite, plus (info["k_model"])
+     the conditional version k(fire size, day/night, time gap) that kmodel.py fits and cross-validates on the same pixels.
+@@ -635,6 +680,7 @@ def build_calendar(m, v, ref_sat, t0, t1, observed=None, scale_basis=None, clear
+     cal["harmonized_is_measured"] = is_meas
+     cal["harmonized_frp_mw_viirs_equiv"] = np.where(is_meas, cal["viirs_frp_mw"], np.nan)
+     cal["harmonized_source"] = np.where(is_meas, f"VIIRS {ref_sat}", "none")
++    apply_single_day_demo(cal, ref_sat)
+     eq_mw = cal["modis_frp_viirs_equiv_mw"].to_numpy()
+     cal["modis_only_evidence"] = (status == "viirs_not_observed") & (np.nan_to_num(eq_mw, nan=0.0) > 0)
+     cal["aoi"] = "global" if BBOX is None else ",".join(str(x) for x in BBOX)
+@@ -812,6 +858,16 @@ def main():
+     matched_by_vs = pairs[pairs["n_viirs"] > 0].groupby("viirs_satellite").size()
+     fit_vs = ref_sat if ref_sat in matched_by_vs.index else (matched_by_vs.idxmax() if len(matched_by_vs) else None)
+     mod_sats = sorted(m["source_satellite"].unique())
++
++    def _window_ok(w):
++        for ms_ in mod_sats:
++            sub_ = pairs[(pairs["source_satellite"] == ms_) & (pairs["viirs_satellite"] == fit_vs)] if fit_vs else pairs.iloc[0:0]
++            u_ = _usable(sub_)
++            u_ = u_[u_["abs_dt_min"] <= w]
++            if len(u_) >= MIN_PAIRS_FIT and u_.groupby("cell_id").ngroups >= MIN_CELLS_FIT:
++                return True
++        return False
++    resolve_k_window(_window_ok)
+     fits = {}
+     for ms in mod_sats:
+         sub = pairs[(pairs["source_satellite"] == ms) & (pairs["viirs_satellite"] == fit_vs)] if fit_vs else pairs.iloc[0:0]
+@@ -876,6 +932,7 @@ def main():
+                     f"{K_FIT_MAX_DT_MIN:g} min of VIIRS; a satellite without such matches gets NaN",
+             "conditional_scale_enabled": K_MODEL,
+             "apply_unvalidated_k": APPLY_UNVALIDATED_K,
++            "k_window": dict(K_WINDOW_NOTE),
+             "satellites_without_scale": [s for s in mod_sats if s not in scale]},
+         "modis_satellites": {s: fits[s][1] for s in mod_sats},
+         "modis_versions": versions,
+@@ -928,13 +985,37 @@ def main():
+           "(see harmonized_status; NaN = not observed, never zero):")
+     cols = ["date", "aqua_detections", "viirs_detections", "viirs_frp_mw", "viirs_overpass_clusters",
+             "harmonized_status", "harmonized_frp_mw_viirs_equiv", "modis_only_evidence"]
+-    show = pd.concat([cal[cols].head(5), cal[cols].tail(5)])
++    show = cal[cols].copy() if len(cal) <= 10 else pd.concat([cal[cols].head(5), cal[cols].tail(5)])
+     num = show.select_dtypes("number").columns   # round only numeric columns; "date" is datetime and .round() on it just warns
+     show[num] = show[num].round(2)
+     print(show.to_string(index=False))
++    print_demo_summary(cal, fits, ref_sat)
+     print("\nSaved matched_pairs.csv, calendar_daily.csv, calendar_cells.csv, frp_mapping.json, grid_sensitivity.csv, "
+       "grid_sensitivity.png, k_by_year.png, k_model.png, frp_matchup.png in", PROCESSED_DIR)
+ 
+ 
++def print_demo_summary(cal, fits, ref_sat):
++    """Console summary for PYRO_SINGLE_DAY_DEMO=1 (one line per demo day, plus where MODIS enters)."""
++    if not SINGLE_DAY_DEMO:
++        return
++    d = cal[cal["harmonized_status"] == "demo_partial_window"]
++    print("\n=== SINGLE-DAY DEMO (PYRO_SINGLE_DAY_DEMO=1) ===")
++    print("Input covers less than one UTC day: totals are LOWER BOUNDS for that day, not a validated record.")
++    if d.empty:
++        print("No partial day with reference-VIIRS data was found.")
++        return
++    for _, r in d.iterrows():
++        eq = r.get("modis_frp_viirs_equiv_mw")
++        eq_txt = "n/a (no k for any MODIS satellite)" if pd.isna(eq) else f"{eq:,.0f} MW"
++        print(f"  {pd.Timestamp(r['date']).date()}: VIIRS {ref_sat} {r['viirs_frp_mw']:,.0f} MW "
++              f"({int(r['viirs_detections']):,} detections); MODIS expressed on the VIIRS scale {eq_txt} "
++              f"({int(r['modis_detections']) if pd.notna(r['modis_detections']) else 0:,} MODIS detections)")
++    for s, (k, i) in fits.items():
++        if k is not None:
++            print(f"  {s}: k = {k:.3f} (trust {i['k_trust']}, {i['n_pairs']:,} matched pixels, window {i['fit_max_dt_min']:g} min)")
++        else:
++            print(f"  {s}: no k (it contributes only as a detection count)")
++
++
+ if __name__ == "__main__":
+     main()
+diff --git a/src/harmonize_streaming.py b/src/harmonize_streaming.py
+index c372d75..81d09cd 100644
+--- a/src/harmonize_streaming.py
++++ b/src/harmonize_streaming.py
+@@ -155,6 +155,34 @@ def _aggregate_cells(df: pd.DataFrame, overpass_count: int | None = None) -> pd.
+     return out
+ 
+ 
++def _stream_window_ok(pair_files, fit_vs):
++    """Returns window_ok(w) for harmonize.resolve_k_window, from ONE pass over the matched-pair files: for each
++    candidate window, does any MODIS satellite have >= MIN_PAIRS_FIT usable pixels in >= MIN_CELLS_FIT cells?"""
++    windows = sorted({float(K_FIT_MAX_DT_MIN), *map(float, h.K_FIT_WIDEN_STEPS)})
++    stats_by = {}
++    for (msat, vsat), pth in pair_files.items():
++        if str(vsat) != str(fit_vs) or not Path(pth).exists():
++            continue
++        n = {w: 0 for w in windows}
++        cells = {w: set() for w in windows}
++        for chunk in pd.read_csv(pth, chunksize=STREAM_CHUNK_ROWS, low_memory=False,
++                                 usecols=["n_viirs", "frp", "viirs_frp_sum", "abs_dt_min", "cell_id"]):
++            ok = ((pd.to_numeric(chunk["n_viirs"], errors="coerce") > 0) & (pd.to_numeric(chunk["frp"], errors="coerce") > 0)
++                  & (pd.to_numeric(chunk["viirs_frp_sum"], errors="coerce") > 0))
++            dt = pd.to_numeric(chunk["abs_dt_min"], errors="coerce")
++            for w in windows:
++                sel = ok & (dt <= w)
++                if sel.any():
++                    n[w] += int(sel.sum())
++                    cells[w].update(pd.unique(chunk.loc[sel, "cell_id"]).tolist())
++        stats_by[str(msat)] = (n, cells)
++
++    def window_ok(w):
++        w = min(windows, key=lambda x: abs(x - w))
++        return any(n[w] >= MIN_PAIRS_FIT and len(c[w]) >= h.MIN_CELLS_FIT for n, c in stats_by.values())
++    return window_ok
++
++
+ def _exact_fit_summary(conn: sqlite3.Connection, pair_path: Path, sample: pd.DataFrame,
+                        label: str) -> tuple[float | None, dict]:
+     """Exact full-stream constant k / cell bootstrap; sample-based ancillary/model diagnostics.
+@@ -265,6 +293,10 @@ def _exact_fit_summary(conn: sqlite3.Connection, pair_path: Path, sample: pd.Dat
+     if bad:
+         problems.append(f"k from the other years misses year(s) {bad} by more than sampling error "
+                         f"(|z| > {zcrit:.2f}, Bonferroni over {len(by_year)} years)")
++    if h.K_WINDOW_NOTE["widened"]:
++        problems.append(f"k fitted with the time-gap window widened from {h.K_WINDOW_NOTE['strict_min']:g} to "
++                        f"{h.K_WINDOW_NOTE['used_min']:g} min: part of the MODIS/VIIRS ratio is fire evolution between "
++                        f"the two overpasses, not sensor difference")
+     grade = "HIGH" if not problems else ("LOW" if n_close < K_TRUST_MIN_PAIRS else "MEDIUM")
+ 
+     # Ancillary diagnostics and the conditional k model are deliberately bounded to a stable sample.
+@@ -413,6 +445,7 @@ def _calendar_from_sql(conn: sqlite3.Connection, ref_sat: str, m_sats: list[str]
+     cal["harmonized_is_measured"] = is_meas
+     cal["harmonized_frp_mw_viirs_equiv"] = np.where(is_meas, cal["viirs_frp_mw"], np.nan)
+     cal["harmonized_source"] = np.where(is_meas, f"VIIRS {ref_sat}", "none")
++    h.apply_single_day_demo(cal, ref_sat)
+     eq_mw = cal["modis_frp_viirs_equiv_mw"].to_numpy()
+     cal["modis_only_evidence"] = (status == "viirs_not_observed") & (np.nan_to_num(eq_mw, nan=0.0) > 0)
+     cal["aoi"] = "global" if h.BBOX is None else ",".join(str(x) for x in h.BBOX)
+@@ -546,6 +579,9 @@ def run() -> None:
+                         next(src, None)
+                         shutil.copyfileobj(src, dst)
+ 
++            if h.K_FIT_AUTO_WIDEN:
++                h.resolve_k_window(_stream_window_ok(pair_files, fit_vs))
++                globals()["K_FIT_MAX_DT_MIN"] = h.K_FIT_MAX_DT_MIN      # this module imported its own copy
+             # Stream one bounded sample per MODIS satellite; k and the cell bootstrap are recomputed exactly from disk.
+             fits: dict[str, tuple[float | None, dict]] = {}
+             pair_samples = {}
+@@ -673,6 +709,7 @@ def run() -> None:
+                 "scale_basis": basis,
+                 "scale_policy": {"rule": "a k is applied only to its own MODIS satellite, using close-in-time matches",
+                                  "conditional_scale_enabled": K_MODEL, "apply_unvalidated_k": h.APPLY_UNVALIDATED_K,
++                                 "k_window": dict(h.K_WINDOW_NOTE),
+                                  "satellites_without_scale": [str(s) for s in m_sats if str(s) not in scale]},
+                 "modis_satellites": {str(s): fits[str(s)][1] for s in m_sats},
+                 "modis_versions": versions,
+diff --git a/src/selftest.py b/src/selftest.py
+index 6a7ebfc..1308758 100644
+--- a/src/selftest.py
++++ b/src/selftest.py
+@@ -502,6 +502,46 @@ def check_cloud():
+ 
+ 
+ # --------------------------------------------------------------------------- C. grid
++def check_k_window_and_demo():
++    """(1) the k time-gap window widens only when needed, and says so; (2) PYRO_SINGLE_DAY_DEMO labels a partial day
++    without ever making it a measured day."""
++    saved = (harmonize.K_FIT_MAX_DT_MIN, harmonize.K_FIT_AUTO_WIDEN, dict(harmonize.K_WINDOW_NOTE), harmonize.SINGLE_DAY_DEMO)
++    try:
++        harmonize.K_FIT_AUTO_WIDEN = True
++        harmonize.K_FIT_MAX_DT_MIN = 30.0
++        assert harmonize.resolve_k_window(lambda w: w >= 30) == 30.0 and not harmonize.K_WINDOW_NOTE["widened"]
++        harmonize.K_FIT_MAX_DT_MIN = 30.0
++        assert harmonize.resolve_k_window(lambda w: w >= 60) == 60.0 and harmonize.K_WINDOW_NOTE["widened"]
++        assert harmonize.K_WINDOW_NOTE["strict_min"] == 30.0 and harmonize.K_WINDOW_NOTE["used_min"] == 60.0
++        harmonize.K_FIT_MAX_DT_MIN = 30.0
++        assert harmonize.resolve_k_window(lambda w: False) == 30.0 and not harmonize.K_WINDOW_NOTE["widened"]
++        harmonize.K_FIT_AUTO_WIDEN, harmonize.K_FIT_MAX_DT_MIN = False, 30.0     # a fixed window is never widened
++        assert harmonize.resolve_k_window(lambda w: w >= 60) == 30.0
++        print("k window: kept when it works, widened (and recorded) only when it does not, never when fixed")
++
++        _, _, (m, v, t0, t1, observed, basis), _, _ = _calendar_case(5)
++        t0p = pd.Timestamp("2016-03-01 06:00", tz="UTC")                          # the first day is only partly covered
++        harmonize.SINGLE_DAY_DEMO = False
++        off, _ = harmonize.build_calendar(m, v, "S-NPP", t0p, t1, observed, basis)
++        off = off.set_index("date")
++        assert off.loc["2016-03-01", "harmonized_status"] == "partial_day"
++        assert np.isnan(off.loc["2016-03-01", "harmonized_frp_mw_viirs_equiv"])
++        harmonize.SINGLE_DAY_DEMO = True
++        on, _ = harmonize.build_calendar(m, v, "S-NPP", t0p, t1, observed, basis)
++        on = on.set_index("date")
++        row = on.loc["2016-03-01"]
++        assert row["harmonized_status"] == "demo_partial_window"
++        assert row["harmonized_frp_mw_viirs_equiv"] == row["viirs_frp_mw"] > 0 and not row["harmonized_is_measured"]
++        assert "demo" in row["harmonized_source"]
++        assert on.loc["2016-03-02":, "harmonized_status"].equals(off.loc["2016-03-02":, "harmonized_status"])
++        assert "demo_partial_window" not in anomaly.SCORING_STATUS
++        print("single-day demo: partial day labelled demo_partial_window with a lower-bound value, never measured or scored; other days unchanged")
++    finally:
++        (harmonize.K_FIT_MAX_DT_MIN, harmonize.K_FIT_AUTO_WIDEN, _n, harmonize.SINGLE_DAY_DEMO) = saved
++        harmonize.K_WINDOW_NOTE.clear()
++        harmonize.K_WINDOW_NOTE.update(_n)
++
++
+ def check_grid(M, V):
+     pairs = match_pair(add_features(M), add_features(V), 180)
+     use = harmonize._usable(pairs)
+@@ -792,6 +832,7 @@ def main():
+     check_k_model()
+     check_calendar(M, V)
+     check_cloud()
++    check_k_window_and_demo()
+     check_grid(M, V)
+     check_anomalies()
+     check_hotsync_activity_anomalies()
