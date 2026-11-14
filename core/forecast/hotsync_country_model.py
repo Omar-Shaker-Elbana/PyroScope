@@ -124,18 +124,25 @@ def forecast_latest(models, wide, meta, thr, target, horizons=hm.HORIZONS) -> pd
     }).sort_values(["country", "horizon_days"]).reset_index(drop=True)
 
 
-def prepare_country_series(raw_m, raw_v, target="activity", countries_path=None, bbox=None,
+def prepare_country_series(target="activity", countries_path=None, start=None, end=None,
                            min_active_days=60, max_countries=120):
-    """raw FIRMS frames -> (wide date x country series, meta, info)."""
-    from . import legacy_hotsync_data as hd  # TODO: swap for core.src.harmonize, see legacy_hotsync_data.py
+    """core.src.harmonize's calendar -> (wide date x country series, meta, info).
+
+    STEP 4: replaces the old raw-FIRMS-CSV-in / legacy_hotsync_data.harmonize_by_country
+    path. `python manage.py harmonize` has already produced the per-satellite,
+    trust-graded calendar for the AOI + date range configured in core.src.config;
+    this only reads it (see core.forecast.harmonized_country_data for the
+    activity/frp asymmetry that comes with that swap -- read its module docstring
+    before picking `target` for a new training run).
+
+    Country borders/metadata (load_countries, country_meta) are unchanged and
+    still come from legacy_hotsync_data.py.
+    """
+    from . import harmonized_country_data as hcd
+    from . import legacy_hotsync_data as hd  # country borders/metadata only now
 
     countries = hd.load_countries(countries_path)
-    modis, viirs = hd.prepare(raw_m, bbox), hd.prepare(raw_v, bbox)
-    print("Assigning detections to countries ...")
-    cell_country = hd.build_cell_country_map([modis, viirs], countries)
-    modis, viirs = hd.attach_country(modis, cell_country), hd.attach_country(viirs, cell_country)
-    print(f"  {len(modis):,} MODIS + {len(viirs):,} VIIRS detections fall inside a country")
-    activity, frp, info = hd.harmonize_by_country(modis, viirs)
+    activity, frp, info = hcd.harmonize_by_country(countries, start, end)
     wide = activity if target == "activity" else frp
     keep = select_countries(wide, min_active_days, max_countries)
     meta = country_meta(countries)

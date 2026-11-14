@@ -1,0 +1,28 @@
+<h1>Forecast confidence report</h1>
+{% if rows %}
+  <p>
+    {{ summary.countries }} countries, {{ summary.rows }} forecast rows, {{ summary.scored }} scored against
+    observed activity so far ({{ summary.in_band }} inside the 10-90% band),
+    {{ summary.flagged }} flagged for weak harmonization trust.
+  </p>
+  <table>
+    <tr>
+      <th>Country</th><th>Date</th><th>Horizon</th><th>Predicted</th><th>p10-p90</th><th>Observed</th>
+      <th>In band?</th><th>k_trust</th><th>Confidence</th><th>Harmonization explains miss?</th>
+    </tr>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.country }}</td><td>{{ r.date }}</td><td>{{ r.horizon_days }}</td>
+        <td>{{ r.predicted }}</td><td>{{ r.low_p10 }}-{{ r.high_p90 }}</td>
+        <td>{% if r.observed is not None %}{{ r.observed }}{% else %}pending{% endif %}</td>
+        <td>{{ r.in_band }}</td><td>{{ r.k_trust }}</td><td>{{ r.confidence_flag }}</td>
+        <td>{{ r.harmonization_explains_miss }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+  <p>(Placeholder table -- swap for the real Leaflet/scripts.js-style map once ported, the way
+  forecast/map.html and ingestion/status.html are placeholders too.)</p>
+{% else %}
+  <p>No confidence report yet. Run: python manage.py harmonize &amp;&amp; python manage.py predict_countries
+  -- ... &amp;&amp; python manage.py confidence_report</p>
+{% endif %}
