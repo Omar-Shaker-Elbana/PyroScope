@@ -1,0 +1,1050 @@
+{
+  "window_utc": [
+    "2015-01-02 11:22:00+00:00",
+    "2025-12-31 18:27:00+00:00"
+  ],
+  "match_max_min": 180.0,
+  "reference_viirs_satellite": "S-NPP",
+  "fit_viirs_satellite": "S-NPP",
+  "primary_modis_satellite": "Aqua",
+  "k_by_modis_satellite": {
+    "Aqua": 0.8280049905409793,
+    "Terra": null
+  },
+  "k_applied_to_calendar": {
+    "Aqua": 0.81577198599718,
+    "Terra": null
+  },
+  "scale_form": {
+    "Aqua": "conditional",
+    "Terra": null
+  },
+  "scale_basis": {
+    "Aqua": "own_conditional",
+    "Terra": "none"
+  },
+  "scale_policy": {
+    "rule": "a k is applied only to the satellite it was fitted on, from matches within 30 min of VIIRS; a satellite without such matches gets NaN",
+    "conditional_scale_enabled": true,
+    "apply_unvalidated_k": false,
+    "k_window": {
+      "widened": false,
+      "strict_min": 30.0,
+      "used_min": 30.0
+    },
+    "satellites_without_scale": [
+      "Terra"
+    ]
+  },
+  "modis_satellites": {
+    "Aqua": {
+      "modis_satellite": "Aqua",
+      "k": 0.8280049905409793,
+      "k_trust": "MEDIUM",
+      "k_trust_problems": [
+        "bootstrap 95% CI is 23.0% of k wide (need <= 20%)",
+        "between-year variability of k cannot be bounded: tau = 3%, 95% upper limit 26% (need <= 15%)"
+      ],
+      "n_pairs": 1726,
+      "n_pairs_any_time_gap": 3004,
+      "fit_max_dt_min": 30.0,
+      "k_ci95": [
+        0.7336256858821263,
+        0.9239902927421085
+      ],
+      "k_ci_includes_1": false,
+      "k_se_log": 0.057165634978248656,
+      "k_prediction_interval95_new_year": [
+        0.7115011104781859,
+        0.9635856561066984
+      ],
+      "n_cells": 80,
+      "n_sites_0p01deg": 632,
+      "holdout": {
+        "n_test": 518,
+        "total_pred_over_actual_with_k": 0.9958537676999618,
+        "total_pred_over_actual_identity": 1.2047780071811314
+      },
+      "pixel_corr_log": 0.534891318120107,
+      "cell_total_corr_log": 0.9305520943738531,
+      "cell_corr_log": 0.9305520943738531,
+      "cell_day_corr_log": 0.6519176806601782,
+      "median_abs_dt_min": 14.0,
+      "k_by_year": {
+        "2015": {
+          "n_pairs": 203,
+          "n_cells": 25,
+          "k": 0.871211551293583,
+          "k_ci95": [
+            0.7208464473723796,
+            0.9794750673549972
+          ],
+          "se_log_k": 0.08116552172618431,
+          "k_from_other_years_pred_over_actual": 0.9457182253967004,
+          "loyo_z": -0.5510667783485913
+        },
+        "2016": {
+          "n_pairs": 441,
+          "n_cells": 23,
+          "k": 0.8881483221169506,
+          "k_ci95": [
+            0.7327183054437296,
+            1.0008708942628337
+          ],
+          "se_log_k": 0.07634906537205366,
+          "k_from_other_years_pred_over_actual": 0.9144496242088885,
+          "loyo_z": -0.886982474774313
+        },
+        "2017": {
+          "n_pairs": 217,
+          "n_cells": 26,
+          "k": 0.7688691654103552,
+          "k_ci95": [
+            0.630926626881254,
+            0.8923773497881553
+          ],
+          "se_log_k": 0.08698435906281538,
+          "k_from_other_years_pred_over_actual": 1.085037905384782,
+          "loyo_z": 0.7625638011689244
+        },
+        "2018": {
+          "n_pairs": 185,
+          "n_cells": 34,
+          "k": 0.9721681080287113,
+          "k_ci95": [
+            0.8020917589107127,
+            1.2907431679304464
+          ],
+          "se_log_k": 0.12575289833596578,
+          "k_from_other_years_pred_over_actual": 0.8369830021247517,
+          "loyo_z": -1.2677009233736154
+        },
+        "2019": {
+          "n_pairs": 194,
+          "n_cells": 29,
+          "k": 0.6687308287558288,
+          "k_ci95": [
+            0.42767609276634005,
+            0.796937717175998
+          ],
+          "se_log_k": 0.16150593725629228,
+          "k_from_other_years_pred_over_actual": 1.2718485221513365,
+          "loyo_z": 1.3950861483687698
+        },
+        "2020": {
+          "n_pairs": 132,
+          "n_cells": 34,
+          "k": 0.6981704545011047,
+          "k_ci95": [
+            0.5228386652311405,
+            1.0276860297912895
+          ],
+          "se_log_k": 0.17835525322241036,
+          "k_from_other_years_pred_over_actual": 1.2071431219245217,
+          "loyo_z": 1.0045378562174236
+        },
+        "2021": {
+          "n_pairs": 89,
+          "n_cells": 32,
+          "k": 0.7784918502577657,
+          "k_ci95": [
+            0.508549329083609,
+            1.1689013697340276
+          ],
+          "se_log_k": 0.21237468942316512,
+          "k_from_other_years_pred_over_actual": 1.0668973592445767,
+          "loyo_z": 0.29418083558099717
+        },
+        "2022": {
+          "n_pairs": 70,
+          "n_cells": 30,
+          "k": 1.162925025776991,
+          "k_ci95": [
+            0.6546496026626323,
+            1.9314663206484657
+          ],
+          "se_log_k": 0.27808376949275154,
+          "k_from_other_years_pred_over_actual": 0.6926904014637336,
+          "loyo_z": -1.2927817380071263
+        },
+        "2023": {
+          "n_pairs": 101,
+          "n_cells": 33,
+          "k": 0.9546583374559829,
+          "k_ci95": [
+            0.67676661749374,
+            1.222239626350142
+          ],
+          "se_log_k": 0.15163450333251272,
+          "k_from_other_years_pred_over_actual": 0.8580909177630952,
+          "loyo_z": -0.9403539913993668
+        },
+        "2024": {
+          "n_pairs": 70,
+          "n_cells": 26,
+          "k": 0.6819825924111146,
+          "k_ci95": [
+            0.4698010077802421,
+            0.9653564518244463
+          ],
+          "se_log_k": 0.1889594476962571,
+          "k_from_other_years_pred_over_actual": 1.2260917248318088,
+          "loyo_z": 1.0287021868877828
+        }
+      },
+      "k_year_spread_max_minus_min_over_median": 0.5991309668834187,
+      "k_year_heterogeneity": {
+        "n_years": 10,
+        "Q": 9.613175769379435,
+        "df": 9,
+        "p_Q": 0.3826981651282375,
+        "I2": 0.0637849326892124,
+        "tau": 0.032502798721779635,
+        "tau_ci95": [
+          0.0,
+          0.25859568887720547
+        ],
+        "mu_random": -0.1753291188770119,
+        "se_mu_random": 0.04010372799956831
+      },
+      "n_days_used": 899,
+      "k_ci_rel_width": 0.22990755977884506,
+      "interpretation": "per-year k spans 60% (max-min / median) but the median per-year standard error is 16%: the year-to-year scatter is compatible with sampling error alone (Cochran Q p = 0.38, I2 = 6%). Estimated between-year SD tau = 3% (95% interval 0%-26%): the data cannot exclude a real year-to-year variation of that size, which is carried into k_prediction_interval95_new_year.",
+      "k_model": {
+        "available": true,
+        "estimator": "quasi-Poisson regression, log link, offset log(MODIS FRP) (nests k = sum VIIRS / sum MODIS)",
+        "terms_estimable": [
+          "size",
+          "night",
+          "dt"
+        ],
+        "terms_not_estimable": [],
+        "applied_at": "dt = 0 (simultaneous overpass); unknown day/night -> fitted night share; FRP clipped to [4.14, 458] MW (central 99.8% of the fit)",
+        "cv": {
+          "scheme": "10-fold, whole 0.5-degree cells held out (clusters = the bootstrap unit)",
+          "n_folds": 10,
+          "loss": "Poisson deviance of VIIRS footprint FRP; held-out pixels predicted at their observed time gap",
+          "selection_rule": "simplest term subset within one paired standard error of the best",
+          "best_subset": [
+            "size"
+          ],
+          "selected_subset": [
+            "size"
+          ],
+          "candidates": [
+            {
+              "terms": [
+                "size"
+              ],
+              "n_params": 2,
+              "cv_deviance": 18467.42342613516,
+              "delta_vs_best": 0.0,
+              "se_delta": 0.0,
+              "within_1se_of_best": true,
+              "total_pred_over_obs": 1.0158955729401735
+            },
+            {
+              "terms": [
+                "size",
+                "dt"
+              ],
+              "n_params": 3,
+              "cv_deviance": 18493.418739531204,
+              "delta_vs_best": 25.995313396044367,
+              "se_delta": 69.29543861686005,
+              "within_1se_of_best": true,
+              "total_pred_over_obs": 1.015577207854835
+            },
+            {
+              "terms": [
+                "size",
+                "night"
+              ],
+              "n_params": 3,
+              "cv_deviance": 18577.01830088117,
+              "delta_vs_best": 109.59487474600974,
+              "se_delta": 34.075235640412785,
+              "within_1se_of_best": false,
+              "total_pred_over_obs": 1.0212932916201496
+            },
+            {
+              "terms": [
+                "size",
+                "night",
+                "dt"
+              ],
+              "n_params": 4,
+              "cv_deviance": 18595.49160072824,
+              "delta_vs_best": 128.0681745930815,
+              "se_delta": 66.68681120295732,
+              "within_1se_of_best": false,
+              "total_pred_over_obs": 1.0206946373612715
+            },
+            {
+              "terms": [
+                "dt"
+              ],
+              "n_params": 2,
+              "cv_deviance": 18834.535248144588,
+              "delta_vs_best": 367.1118220094286,
+              "se_delta": 364.4450251637081,
+              "within_1se_of_best": false,
+              "total_pred_over_obs": 1.0043186479452182
+            },
+            {
+              "terms": [],
+              "n_params": 1,
+              "cv_deviance": 18841.24135512371,
+              "delta_vs_best": 373.817928988552,
+              "se_delta": 357.26995371261546,
+              "within_1se_of_best": false,
+              "total_pred_over_obs": 1.0039864017148168
+            },
+            {
+              "terms": [
+                "night"
+              ],
+              "n_params": 2,
+              "cv_deviance": 18851.970802147094,
+              "delta_vs_best": 384.54737601193483,
+              "se_delta": 338.4193446488923,
+              "within_1se_of_best": false,
+              "total_pred_over_obs": 1.0137584253820988
+            },
+            {
+              "terms": [
+                "night",
+                "dt"
+              ],
+              "n_params": 3,
+              "cv_deviance": 18861.224358138803,
+              "delta_vs_best": 393.80093200364354,
+              "se_delta": 355.5889937519182,
+              "within_1se_of_best": false,
+              "total_pred_over_obs": 1.0138219734343157
+            }
+          ],
+          "non_converged_fits": 0
+        },
+        "cv_leave_one_year_out": {
+          "years": [
+            2015,
+            2016,
+            2017,
+            2018,
+            2019,
+            2020,
+            2021,
+            2022,
+            2023,
+            2024,
+            2025
+          ],
+          "constant_k_cv_deviance": 18835.24907900879,
+          "selected_cv_deviance": 18408.967512653304,
+          "total_pred_over_obs_by_year": {
+            "constant_k": {
+              "2015": 0.9457182328241084,
+              "2016": 0.914449625642314,
+              "2017": 1.0850378951946709,
+              "2018": 0.8369830061266449,
+              "2019": 1.2718485160431974,
+              "2020": 1.2071431398486787,
+              "2021": 1.0668973425725379,
+              "2022": 0.6926903940699521,
+              "2023": 0.8580909223621223,
+              "2024": 1.2260917407494991,
+              "2025": 1.2455758723957155
+            },
+            "selected": {
+              "2015": 1.0349772692148445,
+              "2016": 0.9839200231803158,
+              "2017": 1.1606356332493948,
+              "2018": 0.8830460746706843,
+              "2019": 1.2436971852418648,
+              "2020": 1.1083968706969562,
+              "2021": 1.0945027173292916,
+              "2022": 0.639320443713663,
+              "2023": 0.839363016253841,
+              "2024": 1.1812878831523865,
+              "2025": 1.022160283954803
+            }
+          }
+        },
+        "coefficients_all_terms": {
+          "intercept": {
+            "coef": -0.10878532254954895,
+            "ci95": [
+              -0.35173247310892164,
+              0.1526722036567702
+            ],
+            "ci_excludes_0": null
+          },
+          "log_frp": {
+            "coef": -0.13798112512223124,
+            "ci95": [
+              -0.23384027126248752,
+              -0.041756831643582126
+            ],
+            "ci_excludes_0": true
+          },
+          "night": {
+            "coef": -0.041207404010476276,
+            "ci95": [
+              -0.2560267106258589,
+              0.2012463464781545
+            ],
+            "ci_excludes_0": false
+          },
+          "dt_hours": {
+            "coef": 0.2789997282290361,
+            "ci95": [
+              -0.41097959973948667,
+              0.9989652213470774
+            ],
+            "ci_excludes_0": false
+          }
+        },
+        "bootstrap": {
+          "n_boot": 2000,
+          "n_failed_fits": 0,
+          "unit": "0.5-degree cell"
+        },
+        "log_log_ols": {
+          "formula": "log(VIIRS_FRP) ~ log_frp + night + dt_hours",
+          "estimand": "median pixel (log scale), not total FRP",
+          "coef": {
+            "intercept": {
+              "coef": 0.15484471155589216,
+              "ci95": [
+                -0.08567108394109735,
+                0.4154018999408411
+              ]
+            },
+            "log_frp": {
+              "coef": 0.7801930640163556,
+              "ci95": [
+                0.7014345870729384,
+                0.8697246618868736
+              ]
+            },
+            "night": {
+              "coef": 0.08209691645935538,
+              "ci95": [
+                -0.07897634199508463,
+                0.2527556920150117
+              ]
+            },
+            "dt_hours": {
+              "coef": -0.22566957237067062,
+              "ci95": [
+                -0.6559279522006092,
+                0.01984227487220276
+              ]
+            }
+          },
+          "note": "log_frp = 1 + size coefficient of the applied model when both are unbiased for the same relation"
+        },
+        "adopted": true,
+        "model": {
+          "form": "quasi-Poisson, log link, offset log(MODIS FRP): VIIRS FRP = MODIS FRP * exp(coef . x)",
+          "terms": [
+            "size"
+          ],
+          "coef": {
+            "intercept": -0.07178380956056542,
+            "log_frp": -0.13295921502476726
+          },
+          "reference_dt_min": 0.0,
+          "n_pairs": 1726,
+          "centre_log_frp": 2.4159137612711503,
+          "frp_clip": [
+            4.144999861717224,
+            457.95000228884766
+          ],
+          "night_share": 0.6946697566628042
+        },
+        "coefficients_selected": {
+          "intercept": {
+            "coef": -0.07178380956056542,
+            "ci95": [
+              -0.154171498777762,
+              0.06155745618738138
+            ],
+            "ci_excludes_0": null
+          },
+          "log_frp": {
+            "coef": -0.13295921502476726,
+            "ci95": [
+              -0.22993004117718036,
+              -0.030780257110985157
+            ],
+            "ci_excludes_0": true
+          }
+        },
+        "in_sample_total_pred_over_obs": 1.0,
+        "bias_by_frp_bin": [
+          {
+            "frp_min": 3.5999999046325684,
+            "frp_max": 7.5,
+            "n_pairs": 337,
+            "observed_ratio": 0.9958741331861414,
+            "mean_frp": 6.393768551087875,
+            "observed_over_constant_k": 1.2002610691868143,
+            "observed_over_selected_model": 0.9801805268670267
+          },
+          {
+            "frp_min": 7.599999904632568,
+            "frp_max": 9.600000381469727,
+            "n_pairs": 339,
+            "observed_ratio": 0.9028354381696628,
+            "mean_frp": 8.582890898780486,
+            "observed_over_constant_k": 1.0878187327408853,
+            "observed_over_selected_model": 0.9217350865850363
+          },
+          {
+            "frp_min": 9.699999809265137,
+            "frp_max": 12.699999809265137,
+            "n_pairs": 358,
+            "observed_ratio": 0.8873984212292826,
+            "mean_frp": 11.171787701505522,
+            "observed_over_constant_k": 1.0672083534530927,
+            "observed_over_selected_model": 0.9367008198754719
+          },
+          {
+            "frp_min": 12.800000190734863,
+            "frp_max": 19.100000381469727,
+            "n_pairs": 344,
+            "observed_ratio": 0.8571604626124192,
+            "mean_frp": 15.333720928014712,
+            "observed_over_constant_k": 1.0316161945883269,
+            "observed_over_selected_model": 0.9456371060386138
+          },
+          {
+            "frp_min": 19.200000762939453,
+            "frp_max": 982.7999877929688,
+            "n_pairs": 348,
+            "observed_ratio": 0.7690039702226198,
+            "mean_frp": 47.279885056375086,
+            "observed_over_constant_k": 0.9244655184379592,
+            "observed_over_selected_model": 1.0293635225375246
+          }
+        ],
+        "curve": [
+          {
+            "frp": 4.144999861717224,
+            "k": 1.0622391794629127,
+            "k_lo": 0.9134122939935433,
+            "k_hi": 1.2769762175942603
+          },
+          {
+            "frp": 5.042683971138583,
+            "k": 1.0349098880129084,
+            "k_lo": 0.9057348085097574,
+            "k_hi": 1.2257636213103764
+          },
+          {
+            "frp": 6.134779850690562,
+            "k": 1.0082837246206895,
+            "k_lo": 0.8981885351418456,
+            "k_hi": 1.1817873774004577
+          },
+          {
+            "frp": 7.463391327285817,
+            "k": 0.9823425992063668,
+            "k_lo": 0.8876303808129925,
+            "k_hi": 1.1413335796813178
+          },
+          {
+            "frp": 9.07974066876011,
+            "k": 0.9570688871116578,
+            "k_lo": 0.8759253979601155,
+            "k_hi": 1.1024561958320926
+          },
+          {
+            "frp": 11.046143367899422,
+            "k": 0.9324454171255191,
+            "k_lo": 0.8576986610153061,
+            "k_hi": 1.066556463341734
+          },
+          {
+            "frp": 13.438410606153411,
+            "k": 0.9084554598178544,
+            "k_lo": 0.8365449552206581,
+            "k_hi": 1.0327394736417843
+          },
+          {
+            "frp": 16.348772019778565,
+            "k": 0.885082716173374,
+            "k_lo": 0.8106726019749665,
+            "k_hi": 0.9991176195965288
+          },
+          {
+            "frp": 19.889431450495078,
+            "k": 0.8623113065178822,
+            "k_lo": 0.7857315691674462,
+            "k_hi": 0.9732859276878698
+          },
+          {
+            "frp": 24.196892766341286,
+            "k": 0.840125759729468,
+            "k_lo": 0.7596185255030149,
+            "k_hi": 0.9492170212774208
+          },
+          {
+            "frp": 29.437222527104765,
+            "k": 0.8185110027272721,
+            "k_lo": 0.7296763163889886,
+            "k_hi": 0.9304036364745976
+          },
+          {
+            "frp": 35.81245238709677,
+            "k": 0.7974523502306854,
+            "k_lo": 0.7007152630761256,
+            "k_hi": 0.9129960711373777
+          },
+          {
+            "frp": 43.568368068596236,
+            "k": 0.7769354947820241,
+            "k_lo": 0.6730207088797251,
+            "k_hi": 0.9017816475308066
+          },
+          {
+            "frp": 53.00398519607109,
+            "k": 0.7569464970259,
+            "k_lo": 0.6448305017750806,
+            "k_hi": 0.8874344372615051
+          },
+          {
+            "frp": 64.48307731522154,
+            "k": 0.737471776238685,
+            "k_lo": 0.6171793513939554,
+            "k_hi": 0.8775637012928407
+          },
+          {
+            "frp": 78.44820053925031,
+            "k": 0.7184981011016317,
+            "k_lo": 0.5921416606603662,
+            "k_hi": 0.8692588774571446
+          },
+          {
+            "frp": 95.4377555178144,
+            "k": 0.7000125807113845,
+            "k_lo": 0.5673272139168442,
+            "k_hi": 0.8627739782546309
+          },
+          {
+            "frp": 116.10674452272336,
+            "k": 0.6820026558217717,
+            "k_lo": 0.5430416726782988,
+            "k_hi": 0.8541581949856227
+          },
+          {
+            "frp": 141.2520239031463,
+            "k": 0.6644560903109287,
+            "k_lo": 0.5196309423472315,
+            "k_hi": 0.8464685481038038
+          },
+          {
+            "frp": 171.84302547411602,
+            "k": 0.6473609628679555,
+            "k_lo": 0.4964458212776707,
+            "k_hi": 0.8362561950001607
+          },
+          {
+            "frp": 209.05913124717992,
+            "k": 0.6307056588934598,
+            "k_lo": 0.4746132938474087,
+            "k_hi": 0.8294378968932046
+          },
+          {
+            "frp": 254.33514241989886,
+            "k": 0.6144788626084823,
+            "k_lo": 0.45507865754430205,
+            "k_hi": 0.8218094216791254
+          },
+          {
+            "frp": 309.41659560073805,
+            "k": 0.5986695493664445,
+            "k_lo": 0.4341993002536954,
+            "k_hi": 0.8174844952105148
+          },
+          {
+            "frp": 376.4270588886584,
+            "k": 0.5832669781628943,
+            "k_lo": 0.4147084906877569,
+            "k_hi": 0.8102340882143837
+          },
+          {
+            "frp": 457.9500022888478,
+            "k": 0.5682606843379606,
+            "k_lo": 0.3971414321071297,
+            "k_hi": 0.8074370205895607
+          }
+        ],
+        "cv_improvement_over_constant_k": {
+          "deviance_reduction": 0.019840408704646983,
+          "constant_k_cv_deviance": 18841.24135512371,
+          "selected_cv_deviance": 18467.42342613516
+        },
+        "reason": "cross-validation prefers size over the constant k",
+        "size_effect": {
+          "k_change_per_10x_modis_frp": -0.26372376140532905,
+          "ci95": [
+            -0.41106148245111873,
+            -0.06842088643380095
+          ]
+        }
+      },
+      "k_by_modis_version": {
+        "6.03": {
+          "n_pairs": 1531,
+          "k": 0.8392931284721532
+        },
+        "61.03": {
+          "n_pairs": 195,
+          "k": 0.7769532041036947
+        }
+      },
+      "k_by_daynight": {
+        "D": {
+          "n_pairs": 527,
+          "k": 0.7737023631308654
+        },
+        "N": {
+          "n_pairs": 1199,
+          "k": 0.8806933132406419
+        }
+      },
+      "scale_basis": "own_conditional",
+      "k_sensitivity": {
+        "primary_k": 0.8280049985292578,
+        "max_abs_rel_deviation_same_estimand": 0.1083221938430241,
+        "variants": {
+          "primary (|dt| <= 30 min)": {
+            "n_pairs": 1726,
+            "k": 0.8280049985292578,
+            "rel_to_primary": 0.0,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "|dt| <= 10 min": {
+            "n_pairs": 768,
+            "k": 0.7811238431030699,
+            "rel_to_primary": -0.0566194111260927,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "|dt| <= 15 min": {
+            "n_pairs": 974,
+            "k": 0.8128311426774464,
+            "rel_to_primary": -0.018325802234000932,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "|dt| <= 60 min": {
+            "n_pairs": 2767,
+            "k": 0.877733293428767,
+            "rel_to_primary": 0.06005796461113033,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "|dt| <= 120 min": {
+            "n_pairs": 2997,
+            "k": 0.8919804671907028,
+            "rel_to_primary": 0.07726459233347782,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "daytime pixels only": {
+            "n_pairs": 527,
+            "k": 0.7737023631308654,
+            "rel_to_primary": -0.0655824970801473,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "night-time pixels only": {
+            "n_pairs": 1199,
+            "k": 0.8806933132406419,
+            "rel_to_primary": 0.06363284618446952,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "presumed vegetation fires only (FIRMS type 0)": {
+            "n_pairs": 645,
+            "k": 0.8099263633224156,
+            "rel_to_primary": -0.021833968682501093,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "static land sources only (type 2: flares, industry)": {
+            "n_pairs": 1081,
+            "k": 0.851177857337728,
+            "rel_to_primary": 0.02798637550453309,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "MODIS high-confidence pixels only": {
+            "n_pairs": 336,
+            "k": 0.7977609467896615,
+            "rel_to_primary": -0.036526412030503774,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "MODIS product version 6.03": {
+            "n_pairs": 1531,
+            "k": 0.8392931284721532,
+            "rel_to_primary": 0.013632924877200026,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "MODIS product version 61.03": {
+            "n_pairs": 195,
+            "k": 0.7769532041036947,
+            "rel_to_primary": -0.06165638434096865,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "MODIS FRP below the median": {
+            "n_pairs": 866,
+            "k": 0.917696316482937,
+            "rel_to_primary": 0.1083221938430241,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "MODIS FRP above the median": {
+            "n_pairs": 860,
+            "k": 0.8013659729544749,
+            "rel_to_primary": -0.03217254197994024,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "drop the largest 1 % of MODIS pixels": {
+            "n_pairs": 1708,
+            "k": 0.8931929078799818,
+            "rel_to_primary": 0.0787288838431095,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "drop the largest 5 % of MODIS pixels": {
+            "n_pairs": 1639,
+            "k": 0.8979237804431159,
+            "rel_to_primary": 0.08444246355764906,
+            "estimand": "total FRP (ratio of sums)"
+          },
+          "median of pixel ratios (typical pixel)": {
+            "n_pairs": 1726,
+            "k": 0.7349881283738096,
+            "rel_to_primary": -0.11233853699031926,
+            "estimand": "typical pixel (NOT total FRP): different quantity, shown for reference"
+          },
+          "geometric mean of pixel ratios": {
+            "n_pairs": 1726,
+            "k": 0.6705882599210568,
+            "rel_to_primary": -0.19011568636398601,
+            "estimand": "typical pixel (NOT total FRP): different quantity, shown for reference"
+          }
+        },
+        "note": "k is an aggregate ratio conditional on a MODIS detection; it varies with fire size and time gap, so a single constant is an approximation whose size is read off this table."
+      },
+      "k_ci_by_cluster_unit": [
+        {
+          "unit": "pixel (no clustering)",
+          "n_clusters": 1726,
+          "k_ci95": [
+            0.7563621808730188,
+            0.9048719263981568
+          ],
+          "rel_width": 0.17935851328063018,
+          "reliable": true
+        },
+        {
+          "unit": "0.05 deg cell",
+          "n_clusters": 417,
+          "k_ci95": [
+            0.7396913484014302,
+            0.9146110448135922
+          ],
+          "rel_width": 0.21125439667980597,
+          "reliable": true
+        },
+        {
+          "unit": "0.1 deg cell",
+          "n_clusters": 294,
+          "k_ci95": [
+            0.7387579894267833,
+            0.9120543849691187
+          ],
+          "rel_width": 0.20929390021817842,
+          "reliable": true
+        },
+        {
+          "unit": "0.25 deg cell",
+          "n_clusters": 142,
+          "k_ci95": [
+            0.7341378650521747,
+            0.920641964036382
+          ],
+          "rel_width": 0.22524513658188636,
+          "reliable": true
+        },
+        {
+          "unit": "0.5 deg cell",
+          "n_clusters": 80,
+          "k_ci95": [
+            0.7333701085680254,
+            0.9245510202706091
+          ],
+          "rel_width": 0.23089342702298704,
+          "reliable": true
+        },
+        {
+          "unit": "1 deg cell",
+          "n_clusters": 46,
+          "k_ci95": [
+            0.7459894980674664,
+            0.8935181987688031
+          ],
+          "rel_width": 0.17817368368957226,
+          "reliable": true
+        },
+        {
+          "unit": "2 deg cell",
+          "n_clusters": 23,
+          "k_ci95": [
+            0.7603333195558091,
+            0.8771967101921072
+          ],
+          "rel_width": 0.141138508636876,
+          "reliable": false
+        },
+        {
+          "unit": "4 deg cell",
+          "n_clusters": 9,
+          "k_ci95": [
+            0.7828013970841127,
+            0.8670957652964313
+          ],
+          "rel_width": 0.10180417794825673,
+          "reliable": false
+        },
+        {
+          "unit": "site (0.01 deg)",
+          "n_clusters": 632,
+          "k_ci95": [
+            0.7401261706710546,
+            0.9241668050108244
+          ],
+          "rel_width": 0.22226995569673083,
+          "reliable": true
+        },
+        {
+          "unit": "day",
+          "n_clusters": 899,
+          "k_ci95": [
+            0.755460613207983,
+            0.9053348535632799
+          ],
+          "rel_width": 0.1810064439484191,
+          "reliable": true
+        },
+        {
+          "unit": "calendar month",
+          "n_clusters": 127,
+          "k_ci95": [
+            0.7570510419463634,
+            0.902613339565942
+          ],
+          "rel_width": 0.1757988150773647,
+          "reliable": true
+        }
+      ]
+    },
+    "Terra": {
+      "modis_satellite": "Terra",
+      "k": null,
+      "k_trust": "NOT_VALIDATED",
+      "k_trust_problems": [
+        "only 3 matched pixels within 30 min of VIIRS (need >= 50 in >= 10 cells)"
+      ],
+      "n_pairs": 3,
+      "n_pairs_any_time_gap": 1212,
+      "fit_max_dt_min": 30.0,
+      "note": "no close-in-time overpass pairs: k cannot be validated for this satellite and it receives NO VIIRS-equivalent FRP unless PYRO_APPLY_UNVALIDATED_K=1",
+      "k_diagnostic_all_gaps": {
+        "k": 0.7477658880597323,
+        "k_ci95": [
+          0.564294466863925,
+          0.8509485428637024
+        ],
+        "n_pairs": 1212,
+        "median_abs_dt_min": 149.0,
+        "warning": "overpasses this far apart see different fire states (diurnal cycle): NOT a calibration"
+      },
+      "k_by_modis_version": {},
+      "k_by_daynight": {},
+      "scale_basis": "none"
+    }
+  },
+  "modis_versions": [
+    "6.03",
+    "61.03"
+  ],
+  "observation_inference": {
+    "viirs": "S-NPP raw rows per day",
+    "Aqua": "Aqua raw rows per day",
+    "Terra": "Terra raw rows per day"
+  },
+  "harmonized_status_counts": {
+    "measured": 3942,
+    "measured_low_coverage": 37,
+    "viirs_not_observed": 36,
+    "partial_day": 2
+  },
+  "daily_total_relationship": {
+    "modis_satellites": "Aqua",
+    "n_days": 3959,
+    "share_days_modis_zero": 0.5127557464006063,
+    "corr_log1p": 0.31349536929015553,
+    "r2_log1p": 0.098279346566371,
+    "total_viirs_over_scaled_modis": 10.91046718719849,
+    "median_daily_viirs_over_scaled_modis_when_modis_detects": 8.39158526122545,
+    "conclusion": "k aligns FRP inside co-detected footprints only; MODIS misses most of the small fires VIIRS 375 m sees, so its scaled daily total is biased low and weakly predictive. A missing VIIRS day is therefore left missing (modis_only_evidence marks days where MODIS alone saw fire)."
+  },
+  "detection_sensitivity": {
+    "basis": "all MODIS satellites (Terra + Aqua) vs the VIIRS reference",
+    "complete_days_used": 3937,
+    "viirs_over_modis_detections": 22.352930032836575,
+    "viirs_over_modis_active_cells": 11.523344078194864,
+    "share_of_modis_active_cells_also_viirs": 0.7568888426744307,
+    "cell_deg": 0.5,
+    "like_for_like": {
+      "modis_satellite": "Aqua",
+      "basis": "Aqua x VIIRS reference (same overpass time), days observed and complete",
+      "complete_days_used": 3959,
+      "viirs_over_modis_detections": 58.78981206726014,
+      "viirs_over_modis_scaled_total_frp": 10.910467657952204,
+      "viirs_over_modis_active_cells": 27.653531598513013,
+      "share_of_modis_active_cells_also_viirs": 0.869640644361834,
+      "cell_deg": 0.5
+    }
+  },
+  "caveat": "k is an aggregate statistical mapping fitted on footprints where BOTH sensors detected fire, conditional on a MODIS detection; it is not a physical calibration, not a detection-probability correction, and it is specific to the MODIS satellite it was fitted on.",
+  "grid_sensitivity": {
+    "grids_deg": [
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1.0,
+      2.0
+    ],
+    "k_point_estimate_identical_across_grids": true,
+    "calendar_daily_frp_totals_depend_on_grid": false,
+    "at_calendar_grid": {
+      "modis_satellite": "Aqua",
+      "basis": "Aqua x VIIRS reference (same overpass time), days observed and complete",
+      "complete_days_used": 3959,
+      "viirs_over_modis_detections": 58.78981206726014,
+      "viirs_over_modis_scaled_total_frp": 10.910467657952204,
+      "viirs_over_modis_active_cells": 27.653531598513013,
+      "share_of_modis_active_cells_also_viirs": 0.869640644361834,
+      "cell_deg": 0.5
+    },
+    "table": "grid_sensitivity.csv",
+    "median_latitude_of_detections": 30.52284049987793,
+    "area_distortion": "a lat/lon cell shrinks with cos(latitude): per-cell totals are comparable only between cells at similar latitudes; calendar_cells.csv carries cell_area_km2 for density normalisation. For a global run use an equal-area grid.",
+    "reading_guide": [
+      "k and daily FRP totals: identical for every grid (ratio of sums over pixels).",
+      "viirs_over_modis_active_cells and share_of_modis_active_cells_also_viirs: change with the grid (coarser cells merge several fires into one 'active cell', so the ratio falls towards 1 and the overlap towards 100 %): quote them together with cell_deg, never as grid-free properties of the sensors.",
+      "k_ci_rel_width: grows from pixel to ~0.25-0.5 deg cells (spatial dependence is captured) and collapses for cells that leave fewer than 30 clusters (ci_reliable = False).",
+      "cell_total_corr_log (per-cell totals over the whole record) is inflated by aggregation; cell_day_corr_log is the fairer cell-level agreement.",
+      "edge_split_probability_1km: chance that two detections 1 km apart (one fire seen by both sensors) land in different cells; it is the matching error of the grid, small at 0.5 deg, large at 0.05 deg."
+    ]
+  }
+}

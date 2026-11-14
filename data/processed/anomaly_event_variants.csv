@@ -1,0 +1,53 @@
+event_id,variant,family,in_consensus,testable,detected,peak_z
+E1,production analysis,production,False,True,True,3.1185740338107255
+E2,production analysis,production,False,True,True,4.209337169487471
+E3,production analysis,production,False,True,True,3.6335144127684096
+E4,production analysis,production,False,True,True,3.6237624453609074
+E1,baseline window +-3 days,baseline window,True,True,True,3.6495759727128827
+E2,baseline window +-3 days,baseline window,True,True,True,4.6291074677173105
+E3,baseline window +-3 days,baseline window,True,True,True,3.686346929077452
+E4,baseline window +-3 days,baseline window,True,True,True,4.107460735746802
+E1,baseline window +-14 days,baseline window,True,True,True,3.1368694447904617
+E2,baseline window +-14 days,baseline window,True,True,True,4.33595586575941
+E3,baseline window +-14 days,baseline window,True,True,True,3.2974362128827415
+E4,baseline window +-14 days,baseline window,True,True,False,3.4162388668856276
+E1,baseline window +-21 days,baseline window,True,True,True,3.142079506591342
+E2,baseline window +-21 days,baseline window,True,True,True,4.196346226725453
+E3,baseline window +-21 days,baseline window,True,True,True,3.3391056926604854
+E4,baseline window +-21 days,baseline window,True,True,True,3.4476876090560915
+E1,scale = IQR/1.349 instead of MAD,scale estimator,True,True,True,3.1020866340332525
+E2,scale = IQR/1.349 instead of MAD,scale estimator,True,True,True,4.110948961797264
+E3,scale = IQR/1.349 instead of MAD,scale estimator,True,True,True,3.7346886196024296
+E4,scale = IQR/1.349 instead of MAD,scale estimator,True,True,True,3.3788432817993725
+E1,baseline skips the two neighbouring years,baseline period,True,True,True,4.502526260232361
+E2,baseline skips the two neighbouring years,baseline period,True,True,True,4.381973634384452
+E3,baseline skips the two neighbouring years,baseline period,True,True,True,3.553991080143169
+E4,baseline skips the two neighbouring years,baseline period,True,True,False,3.506185029245309
+E1,baseline = earlier years only (causal),baseline period,True,False,True,3.1256911089490718
+E2,baseline = earlier years only (causal),baseline period,True,True,True,4.675207781483344
+E3,baseline = earlier years only (causal),baseline period,True,True,True,3.7935289458826387
+E4,baseline = earlier years only (causal),baseline period,True,True,False,3.377939122263836
+E1,annual level removed (trend-robust),trend,True,True,False,2.625628631509129
+E2,annual level removed (trend-robust),trend,True,True,True,5.267284495885951
+E3,annual level removed (trend-robust),trend,True,True,True,4.135155307314687
+E4,annual level removed (trend-robust),trend,True,True,True,3.7894590322131645
+E1,baseline = 2015-2019 only,baseline period,True,True,True,3.034599872787412
+E2,baseline = 2015-2019 only,baseline period,True,True,True,4.531641106285526
+E3,baseline = 2015-2019 only,baseline period,True,True,True,3.553392639470321
+E4,baseline = 2015-2019 only,baseline period,True,True,False,2.6198497371837286
+E1,baseline = 2020-2025 only,baseline period,True,True,True,3.384676375097926
+E2,baseline = 2020-2025 only,baseline period,True,True,True,3.2048137816629505
+E3,baseline = 2020-2025 only,baseline period,True,True,True,3.629634108588114
+E4,baseline = 2020-2025 only,baseline period,True,True,True,4.774989048167174
+E1,classical mean / SD z-score,classical z (not robust),False,True,True,3.1167195689593346
+E2,classical mean / SD z-score,classical z (not robust),False,True,True,3.9031903438432347
+E3,classical mean / SD z-score,classical z (not robust),False,True,False,2.8759964833409977
+E4,classical mean / SD z-score,classical z (not robust),False,True,False,3.365786897932819
+E1,outage-suspect days re-admitted,missing data,False,True,True,3.275058735677676
+E2,outage-suspect days re-admitted,missing data,False,True,True,4.209337169487471
+E3,outage-suspect days re-admitted,missing data,False,True,True,3.6335144127684096
+E4,outage-suspect days re-admitted,missing data,False,True,True,3.6237624453609074
+E1,NO seasonal baseline (whole year pooled),negative control,False,True,True,3.2180041931123684
+E2,NO seasonal baseline (whole year pooled),negative control,False,True,True,3.7032613579888407
+E3,NO seasonal baseline (whole year pooled),negative control,False,True,True,3.1875800582119904
+E4,NO seasonal baseline (whole year pooled),negative control,False,True,True,3.1811452263699445
