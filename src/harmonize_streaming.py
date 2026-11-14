@@ -34,7 +34,7 @@ from src.config import (
     K_MODEL_FOLDS, K_MODEL_CLIP_Q, CELL_DEG, GRID_SENS_DEG, DAY_TOL_MIN,
     COV_CLUSTER_GAP_MIN,
 )
-from src.io_utils import TEXT_COLS
+from src.io_utils import TEXT_COLS, clean_stale_temp_dirs
 from src.kstats import ratio_ci, heterogeneity, prediction_interval
 
 STREAM_SAMPLE_ROWS = int(os.getenv("PYRO_STREAM_SAMPLE_ROWS", "100000"))
@@ -155,6 +155,34 @@ def _aggregate_cells(df: pd.DataFrame, overpass_count: int | None = None) -> pd.
     return out
 
 
+def _stream_window_ok(pair_files, fit_vs):
+    """Returns window_ok(w) for harmonize.resolve_k_window, from ONE pass over the matched-pair files: for each
+    candidate window, does any MODIS satellite have >= MIN_PAIRS_FIT usable pixels in >= MIN_CELLS_FIT cells?"""
+    windows = sorted({float(K_FIT_MAX_DT_MIN), *map(float, h.K_FIT_WIDEN_STEPS)})
+    stats_by = {}
+    for (msat, vsat), pth in pair_files.items():
+        if str(vsat) != str(fit_vs) or not Path(pth).exists():
+            continue
+        n = {w: 0 for w in windows}
+        cells = {w: set() for w in windows}
+        for chunk in pd.read_csv(pth, chunksize=STREAM_CHUNK_ROWS, low_memory=False,
+                                 usecols=["n_viirs", "frp", "viirs_frp_sum", "abs_dt_min", "cell_id"]):
+            ok = ((pd.to_numeric(chunk["n_viirs"], errors="coerce") > 0) & (pd.to_numeric(chunk["frp"], errors="coerce") > 0)
+                  & (pd.to_numeric(chunk["viirs_frp_sum"], errors="coerce") > 0))
+            dt = pd.to_numeric(chunk["abs_dt_min"], errors="coerce")
+            for w in windows:
+                sel = ok & (dt <= w)
+                if sel.any():
+                    n[w] += int(sel.sum())
+                    cells[w].update(pd.unique(chunk.loc[sel, "cell_id"]).tolist())
+        stats_by[str(msat)] = (n, cells)
+
+    def window_ok(w):
+        w = min(windows, key=lambda x: abs(x - w))
+        return any(n[w] >= MIN_PAIRS_FIT and len(c[w]) >= h.MIN_CELLS_FIT for n, c in stats_by.values())
+    return window_ok
+
+
 def _exact_fit_summary(conn: sqlite3.Connection, pair_path: Path, sample: pd.DataFrame,
                        label: str) -> tuple[float | None, dict]:
     """Exact full-stream constant k / cell bootstrap; sample-based ancillary/model diagnostics.
@@ -265,6 +293,10 @@ def _exact_fit_summary(conn: sqlite3.Connection, pair_path: Path, sample: pd.Dat
     if bad:
         problems.append(f"k from the other years misses year(s) {bad} by more than sampling error "
                         f"(|z| > {zcrit:.2f}, Bonferroni over {len(by_year)} years)")
+    if h.K_WINDOW_NOTE["widened"]:
+        problems.append(f"k fitted with the time-gap window widened from {h.K_WINDOW_NOTE['strict_min']:g} to "
+                        f"{h.K_WINDOW_NOTE['used_min']:g} min: part of the MODIS/VIIRS ratio is fire evolution between "
+                        f"the two overpasses, not sensor difference")
     grade = "HIGH" if not problems else ("LOW" if n_close < K_TRUST_MIN_PAIRS else "MEDIUM")
 
     # Ancillary diagnostics and the conditional k model are deliberately bounded to a stable sample.
@@ -413,6 +445,7 @@ def _calendar_from_sql(conn: sqlite3.Connection, ref_sat: str, m_sats: list[str]
     cal["harmonized_is_measured"] = is_meas
     cal["harmonized_frp_mw_viirs_equiv"] = np.where(is_meas, cal["viirs_frp_mw"], np.nan)
     cal["harmonized_source"] = np.where(is_meas, f"VIIRS {ref_sat}", "none")
+    h.apply_single_day_demo(cal, ref_sat)
     eq_mw = cal["modis_frp_viirs_equiv_mw"].to_numpy()
     cal["modis_only_evidence"] = (status == "viirs_not_observed") & (np.nan_to_num(eq_mw, nan=0.0) > 0)
     cal["aoi"] = "global" if h.BBOX is None else ",".join(str(x) for x in h.BBOX)
@@ -451,6 +484,7 @@ def run() -> None:
     cloud_table = cloud_mask.read_table(CLOUD_FILE) if CLOUD_FILE is not None else None
     modis_path = PROCESSED_DIR / "modis_standardized.csv"
     viirs_path = PROCESSED_DIR / "viirs_standardized.csv"
+    clean_stale_temp_dirs(PROCESSED_DIR, ("pyroscope_dedupe_", "pyroscope_stream_"))
     with tempfile.TemporaryDirectory(prefix="pyroscope_stream_", dir=PROCESSED_DIR) as td:
         temp = Path(td)
         db_path = temp / "stage.sqlite"
@@ -546,6 +580,9 @@ def run() -> None:
                         next(src, None)
                         shutil.copyfileobj(src, dst)
 
+            if h.K_FIT_AUTO_WIDEN:
+                h.resolve_k_window(_stream_window_ok(pair_files, fit_vs))
+                globals()["K_FIT_MAX_DT_MIN"] = h.K_FIT_MAX_DT_MIN      # this module imported its own copy
             # Stream one bounded sample per MODIS satellite; k and the cell bootstrap are recomputed exactly from disk.
             fits: dict[str, tuple[float | None, dict]] = {}
             pair_samples = {}
@@ -673,6 +710,7 @@ def run() -> None:
                 "scale_basis": basis,
                 "scale_policy": {"rule": "a k is applied only to its own MODIS satellite, using close-in-time matches",
                                  "conditional_scale_enabled": K_MODEL, "apply_unvalidated_k": h.APPLY_UNVALIDATED_K,
+                                 "k_window": dict(h.K_WINDOW_NOTE),
                                  "satellites_without_scale": [str(s) for s in m_sats if str(s) not in scale]},
                 "modis_satellites": {str(s): fits[str(s)][1] for s in m_sats},
                 "modis_versions": versions,

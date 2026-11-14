@@ -502,6 +502,46 @@ def check_cloud():
 
 
 # --------------------------------------------------------------------------- C. grid
+def check_k_window_and_demo():
+    """(1) the k time-gap window widens only when needed, and says so; (2) PYRO_SINGLE_DAY_DEMO labels a partial day
+    without ever making it a measured day."""
+    saved = (harmonize.K_FIT_MAX_DT_MIN, harmonize.K_FIT_AUTO_WIDEN, dict(harmonize.K_WINDOW_NOTE), harmonize.SINGLE_DAY_DEMO)
+    try:
+        harmonize.K_FIT_AUTO_WIDEN = True
+        harmonize.K_FIT_MAX_DT_MIN = 30.0
+        assert harmonize.resolve_k_window(lambda w: w >= 30) == 30.0 and not harmonize.K_WINDOW_NOTE["widened"]
+        harmonize.K_FIT_MAX_DT_MIN = 30.0
+        assert harmonize.resolve_k_window(lambda w: w >= 60) == 60.0 and harmonize.K_WINDOW_NOTE["widened"]
+        assert harmonize.K_WINDOW_NOTE["strict_min"] == 30.0 and harmonize.K_WINDOW_NOTE["used_min"] == 60.0
+        harmonize.K_FIT_MAX_DT_MIN = 30.0
+        assert harmonize.resolve_k_window(lambda w: False) == 30.0 and not harmonize.K_WINDOW_NOTE["widened"]
+        harmonize.K_FIT_AUTO_WIDEN, harmonize.K_FIT_MAX_DT_MIN = False, 30.0     # a fixed window is never widened
+        assert harmonize.resolve_k_window(lambda w: w >= 60) == 30.0
+        print("k window: kept when it works, widened (and recorded) only when it does not, never when fixed")
+
+        _, _, (m, v, t0, t1, observed, basis), _, _ = _calendar_case(5)
+        t0p = pd.Timestamp("2016-03-01 06:00", tz="UTC")                          # the first day is only partly covered
+        harmonize.SINGLE_DAY_DEMO = False
+        off, _ = harmonize.build_calendar(m, v, "S-NPP", t0p, t1, observed, basis)
+        off = off.set_index("date")
+        assert off.loc["2016-03-01", "harmonized_status"] == "partial_day"
+        assert np.isnan(off.loc["2016-03-01", "harmonized_frp_mw_viirs_equiv"])
+        harmonize.SINGLE_DAY_DEMO = True
+        on, _ = harmonize.build_calendar(m, v, "S-NPP", t0p, t1, observed, basis)
+        on = on.set_index("date")
+        row = on.loc["2016-03-01"]
+        assert row["harmonized_status"] == "demo_partial_window"
+        assert row["harmonized_frp_mw_viirs_equiv"] == row["viirs_frp_mw"] > 0 and not row["harmonized_is_measured"]
+        assert "demo" in row["harmonized_source"]
+        assert on.loc["2016-03-02":, "harmonized_status"].equals(off.loc["2016-03-02":, "harmonized_status"])
+        assert "demo_partial_window" not in anomaly.SCORING_STATUS
+        print("single-day demo: partial day labelled demo_partial_window with a lower-bound value, never measured or scored; other days unchanged")
+    finally:
+        (harmonize.K_FIT_MAX_DT_MIN, harmonize.K_FIT_AUTO_WIDEN, _n, harmonize.SINGLE_DAY_DEMO) = saved
+        harmonize.K_WINDOW_NOTE.clear()
+        harmonize.K_WINDOW_NOTE.update(_n)
+
+
 def check_grid(M, V):
     pairs = match_pair(add_features(M), add_features(V), 180)
     use = harmonize._usable(pairs)
@@ -792,6 +832,7 @@ def main():
     check_k_model()
     check_calendar(M, V)
     check_cloud()
+    check_k_window_and_demo()
     check_grid(M, V)
     check_anomalies()
     check_hotsync_activity_anomalies()

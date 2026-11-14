@@ -9,7 +9,7 @@ import numpy as np
 from src.config import (
     RAW_DIR, PROCESSED_DIR, START_DATE, END_DATE, BBOX, CHUNK_ROWS, DEDUPE, AOI_FILE, EXCLUDE_STATIC
 )
-from src.io_utils import find_files, iter_firms_csv
+from src.io_utils import find_files, iter_firms_csv, clean_stale_temp_dirs
 
 SATELLITE_NAMES = {
     "T": "Terra", "A": "Aqua",
@@ -161,6 +161,7 @@ def process_sensor(label, keyword, out_path):
     n_raw = n_kept = n_dup = 0
     first = True
     daily_counts = {}  # bounded by number of days x satellites, not number of detections
+    clean_stale_temp_dirs(PROCESSED_DIR, ("pyroscope_dedupe_", "pyroscope_stream_"))
     # Deduplication state lives on disk: a global uint64 NumPy set grows with the entire archive.
     dedupe_tmp = tempfile.TemporaryDirectory(prefix="pyroscope_dedupe_", dir=PROCESSED_DIR) if DEDUPE else None
     dedupe_db = sqlite3.connect(Path(dedupe_tmp.name) / "seen.sqlite") if dedupe_tmp else None

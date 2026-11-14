@@ -36,3 +36,16 @@ def iter_firms_csv(path: Path, chunksize: int):
     for chunk in pd.read_csv(path, chunksize=chunksize, low_memory=False, dtype=TEXT_COLS):
         chunk.columns = [str(c).strip().lower() for c in chunk.columns]
         yield chunk
+
+
+def clean_stale_temp_dirs(directory, prefixes, max_age_s=3600):
+    """Remove temp folders (e.g. pyroscope_dedupe_*) that a run killed before its cleanup left behind. Only folders older
+    than max_age_s are touched, so a run that is still going in the same output folder is never disturbed."""
+    import shutil, time
+    d = Path(directory)
+    if not d.is_dir():
+        return
+    now = time.time()
+    for p in d.iterdir():
+        if p.is_dir() and p.name.startswith(tuple(prefixes)) and now - p.stat().st_mtime > max_age_s:
+            shutil.rmtree(p, ignore_errors=True)

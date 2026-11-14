@@ -39,7 +39,18 @@ MIN_PAIRS_FIT = int(os.getenv("PYRO_MIN_PAIRS", 50))     # fewer matched pixels 
 
 # --- Multi-year runs / trustworthy k (preprocess.py, harmonize.py) ---
 # k is fitted only on matched pixels whose median |time gap| is at most this many minutes.
-K_FIT_MAX_DT_MIN = float(os.getenv("PYRO_K_MAX_DT_MIN", 30))
+# PYRO_K_MAX_DT_MIN=<minutes> fixes the window. The default, "auto", starts at 30 minutes and widens it ONLY when no MODIS
+# satellite has enough matches inside it (typical: Aqua vs NOAA-20 / J1 VIIRS, ~50 min apart). A widened window is
+# written to frp_mapping.json (scale_policy.k_window) and caps k_trust below HIGH. When 30 minutes already works the
+# output is identical to a fixed 30-minute run.
+_kdt = (os.getenv("PYRO_K_MAX_DT_MIN") or "auto").strip().lower()
+K_FIT_AUTO_WIDEN = _kdt == "auto"
+K_FIT_MAX_DT_MIN = 30.0 if K_FIT_AUTO_WIDEN else float(_kdt)
+K_FIT_WIDEN_STEPS = tuple(float(x) for x in (os.getenv("PYRO_K_WIDEN_STEPS") or "45,60,75,90").split(","))
+# PYRO_SINGLE_DAY_DEMO=1: an input that covers less than one UTC day (e.g. the FIRMS 24h NRT files) gets its partial
+# day labelled `demo_partial_window` with the VIIRS total filled in, instead of a NaN `partial_day`. The value is a
+# lower bound for that day; the status is never scored by anomaly.py. Off by default.
+SINGLE_DAY_DEMO = os.getenv("PYRO_SINGLE_DAY_DEMO", "0") == "1"
 # A k fitted on fewer close-in-time matched pixels than this can never be graded HIGH.
 K_TRUST_MIN_PAIRS = int(os.getenv("PYRO_K_TRUST_PAIRS", 500))
 # Large archives automatically switch to the disk-backed, day-batched harmonizer.

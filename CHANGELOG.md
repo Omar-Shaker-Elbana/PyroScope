@@ -3,6 +3,22 @@
 Backend only (no frontend work). Evidence and reasoning: `docs/METHODOLOGY.md`. A unified diff against
 `pyroscope_modis_viirs_not_final.zip` is in `docs/CHANGES_vs_not_final.patch`.
 
+## Follow-up: J1/NOAA-20 time gap and single-day demo (found while testing the FIRMS 24h NRT files)
+
+* **k window.** Aqua and NOAA-20 (J1) VIIRS pass ~50 min apart, so the fixed 30-minute k window left every MODIS satellite
+  without a k and the whole harmonized series NaN. `PYRO_K_MAX_DT_MIN` now defaults to `auto`: 30 minutes, widened to the
+  first of `PYRO_K_WIDEN_STEPS` (45, 60, 75, 90) that gives >= `PYRO_MIN_PAIRS` pixels in >= 10 cells, and ONLY when 30
+  does not. A widened window is written to `frp_mapping.json` (`scale_policy.k_window`) and a widened k can never be
+  graded HIGH (the reason is added to `k_trust_problems`). Where 30 minutes already works the output is unchanged; a
+  number in `PYRO_K_MAX_DT_MIN` fixes the window exactly as before. Works in the in-memory and the disk-backed path.
+* **Single-day demo.** `PYRO_SINGLE_DAY_DEMO=1`: a day only partly covered by the input (a 24h NRT file never covers a
+  UTC day) gets `harmonized_status = demo_partial_window` and its VIIRS total as a lower-bound `harmonized_frp_mw_viirs_equiv`,
+  instead of `partial_day` / NaN. `harmonized_is_measured` stays False, `anomaly.py` never scores it, and a console
+  summary says so. Off by default; the other statuses are untouched.
+* Minor: no divide-by-zero warning in `per_year_fits` when a standard error is 0; the console "first / last rows" listing
+  no longer prints a short calendar twice.
+* `selftest.py`: `check_k_window_and_demo`.
+
 ## Follow-up: external burned-area validation (review point 7)
 
 * New `src/external_validation.py`: optional event-level comparison with MODIS MCD64A1 Collection 6.1. It uses the
@@ -100,7 +116,7 @@ Backend only (no frontend work). Evidence and reasoning: `docs/METHODOLOGY.md`. 
 * `cell_area_km2` in `calendar_cells.csv`; `cell_day_corr_log` next to the (aggregation-inflated) `cell_total_corr_log`.
 * Justification, what is lost and how to read the cell metrics: `docs/METHODOLOGY.md` section 4.
 
-## Results on the shipped Egypt 2015-2025 data
+## Results on the author's Egypt 2015-2025 data (files not included in the repository)
 
 | | before | after |
 |---|---|---|
