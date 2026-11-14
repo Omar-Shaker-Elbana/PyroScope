@@ -1,8 +1,7 @@
-"""python manage.py predict_countries -- --modis ... --viirs ... --model ...
+"""python manage.py predict_countries --modis ... --viirs ... [--live-key KEY]
 
-Forwards everything after `--` to core.forecast.predict_countries's own
-argparse. See core/forecast/predict_countries.py — it's a reconstruction,
-verify it against your original script if you still have one.
+Forwards every argument after the command name to core.forecast.predict_countries's
+own argparse (Django's option parser is bypassed), so no `--` separator is needed.
 """
 import sys
 
@@ -16,7 +15,8 @@ class Command(BaseCommand):
 
     def run_from_argv(self, argv):
         sys.argv = [argv[0]] + argv[2:]
-        self.execute()
+        # Django's execute() reads these options, which its own parser would normally supply.
+        self.execute(force_color=False, no_color=False, skip_checks=True)
 
     def handle(self, *args, **options):
         predict_countries.main()

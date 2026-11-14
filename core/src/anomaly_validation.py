@@ -27,6 +27,7 @@ import pandas as pd
 from scipy import signal, stats
 
 from core.src import anomaly as A
+from core.src.config import ensure_dirs
 from core.src.config import PROCESSED_DIR, ANOM_Z, ANOM_WINDOW_DAYS, ANOM_REPLICATES, ANOM_NULL_SIMS, ANOM_DETREND
 
 EVENT_PAD = 2                      # a variant "detects" an episode if one of its episodes overlaps it +- this many days
@@ -481,6 +482,7 @@ def plot_validation(v, df, path):
 
 
 def write_outputs(v, df):
+    ensure_dirs()
     (PROCESSED_DIR / "anomaly_validation.json").write_text(json.dumps(_jsonable(v["report"]), indent=2))
     v["variants"].to_csv(PROCESSED_DIR / "anomaly_variants.csv", index=False)
     v["event_variants"].to_csv(PROCESSED_DIR / "anomaly_event_variants.csv", index=False)

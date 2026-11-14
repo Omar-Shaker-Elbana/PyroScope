@@ -1,21 +1,12 @@
-"""Load the trained country model and write a fresh forecast_by_country.csv.
+"""Country-by-country 14-day forecast, ready to view on the HotSync map.
 
-RECONSTRUCTED FILE — see core/forecast/__init__.py docstring. The original
-predict_countries.py failed to extract from the uploaded .rar (0 bytes).
-This rebuild is based on exactly what train_countries.py saves into
-model_countries.joblib and what hotsync_country_model.forecast_latest()
-returns/expects, and it reproduces the header seen in the real
-outputs/forecast_by_country.csv:
-
-    country,name,iso_n3,date,horizon_days,predicted,low_p10,high_p90,
-    typical,busy_day,target
-
-Verify against your own copy if you still have one, and replace this file
-if anything here doesn't match.
+The forecast starts the day after the LAST day in your data, so feed it fresh
+data: re-export recent FIRMS CSVs, or add --live-key to top up with the last ~40
+days of near-real-time detections.
 
 Example:
-    python predict_countries.py --modis modis.csv --viirs viirs.csv \
-        --model outputs/model_countries.joblib --out-dir outputs
+    python manage.py predict_countries --modis modis.csv --viirs viirs.csv
+    python manage.py predict_countries --modis modis.csv --viirs viirs.csv --live-key $FIRMS_MAP_KEY
 """
 from __future__ import annotations
 
@@ -23,6 +14,9 @@ import argparse
 from pathlib import Path
 
 import joblib
+import pandas as pd
+
+from core.src.config import OUTPUTS_DIR
 
 from . import hotsync_country_model as cm
 from . import legacy_hotsync_data as hd  # TODO: swap for core.src.harmonize, see legacy_hotsync_data.py
@@ -32,33 +26,45 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--modis", nargs="+", required=True)
     ap.add_argument("--viirs", nargs="+", required=True)
-    ap.add_argument("--model", default="outputs/model_countries.joblib")
-    ap.add_argument("--out-dir", default="outputs")
+    ap.add_argument("--model", default=str(OUTPUTS_DIR / "model_countries.joblib"))
+    ap.add_argument("--live-key", help="FIRMS MAP_KEY: append the last ~40 days of NRT detections")
+    ap.add_argument("--out-dir", default=str(OUTPUTS_DIR))
     args = ap.parse_args()
 
-    bundle = joblib.load(args.model)
-    models, target = bundle["models"], bundle["target"]
-    countries_path, bbox = bundle["countries_path"], bundle["bbox"]
+    art = joblib.load(args.model)
+    raw_m, raw_v = hd.read_raw(args.modis), hd.read_raw(args.viirs)
+    if args.live_key:
+        b = art["bbox"] or (float(raw_m["latitude"].min()), float(raw_m["latitude"].max()),
+                            float(raw_m["longitude"].min()), float(raw_m["longitude"].max()))
+        print("Fetching latest NASA FIRMS detections ...")
+        live = hd.fetch_live(args.live_key, b)
+        raw_m = pd.concat([raw_m, live["M"]], ignore_index=True)
+        raw_v = pd.concat([raw_v, live["V"]], ignore_index=True)
 
-    # Re-harmonize the freshest raw FIRMS data (same path train_countries.py
-    # used) so `wide` carries whatever days are newest, then restrict to the
-    # countries the model was actually trained on.
-    wide, meta, info = cm.prepare_country_series(
-        hd.read_raw(args.modis), hd.read_raw(args.viirs), target, countries_path, bbox,
-    )
-    trained_cols = [c for c in bundle["countries"] if c in wide.columns]
-    wide, meta = wide[trained_cols], {c: bundle["meta"][c] for c in trained_cols}
+    wide, _, _ = cm.prepare_country_series(raw_m, raw_v, art["target"], art["countries_path"], art["bbox"],
+                                           min_active_days=0, max_countries=10_000)
+    wide = wide[[c for c in art["countries"] if c in wide.columns]]
+    last = wide.index[-1]
+    age = (pd.Timestamp.now().normalize() - last).days
+    if age > 14:
+        print(f"WARNING: newest data is {last.date()} ({age} days old). The forecast covers the 14 days "
+              f"after that date, not today. Use fresher exports or --live-key.")
 
-    forecast = cm.forecast_latest(models, wide, meta, bundle["thresholds"], target)
+    fc = cm.forecast_latest(art["models"], wide, art["meta"], art["thresholds"], art["target"], art["horizons"])
+    out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
+    fc.to_csv(out / "forecast_by_country.csv", index=False)
 
-    out = Path(args.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    forecast.to_csv(out / "forecast_by_country.csv", index=False)
-    print(f"Wrote {len(forecast)} forecast rows for {len(trained_cols)} countries to "
-          f"{(out / 'forecast_by_country.csv').resolve()}")
-    print(f"Model trained through {bundle['trained_through']}; harmonization kM="
-          f"{info['kM']:.2f} kV={info['kV']:.2f} (this run's re-harmonization, "
-          f"for reference against the model's own training-time values)")
+    recent = wide.loc[wide.index >= last - pd.Timedelta(days=59)].stack().rename("observed").reset_index()
+    recent.columns = ["date", "country", "observed"]
+    recent["date"] = recent["date"].dt.date
+    recent.to_csv(out / "recent_by_country.csv", index=False)
+
+    unit = "active cell-days" if art["target"] == "activity" else "MW"
+    print(f"\nLast observed day: {last.date()} | forecast unit: {unit}")
+    top = fc[fc["horizon_days"] == 7].sort_values("predicted", ascending=False).head(10)
+    print("Top 10 countries, predicted value 7 days ahead:")
+    print(top[["name", "date", "predicted", "low_p10", "high_p90", "typical", "busy_day"]].to_string(index=False))
+    print(f"\nSaved forecast_by_country.csv and recent_by_country.csv to {out.resolve()}")
 
 
 if __name__ == "__main__":

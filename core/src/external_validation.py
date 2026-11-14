@@ -1,7 +1,7 @@
 """Optional external validation of PyroScope anomaly events with MODIS MCD64A1.
 
 The normal PyroScope pipeline does not import this module and its anomaly scores are
-never modified. Run it after ``python -m src.anomaly`` and download the matching
+never modified. Run it after ``python -m core.src.anomaly`` and download the matching
 MCD64A1 Collection 6.1 monthly HDF granules separately.
 
 MCD64A1 ``Burn Date`` is day-of-year (1..366; 0 means unburned, negative values
@@ -31,6 +31,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from core.src.config import ensure_dirs
 from core.src.config import CELL_DEG, PROCESSED_DIR
 
 
@@ -486,6 +487,7 @@ def validate_events(events_df: pd.DataFrame, mcd64_dir: str | Path,
         raise ValueError("cell_deg must be greater than 0 and no larger than 10 degrees")
     if not (0 < float(min_coverage) <= 1):
         raise ValueError("min_coverage must be in the interval (0, 1]")
+    ensure_dirs()
     if cells_csv is None:
         cells_csv = PROCESSED_DIR / "calendar_cells.csv"
     if output_csv is None:
@@ -611,7 +613,7 @@ def validate_events(events_df: pd.DataFrame, mcd64_dir: str | Path,
 # --------------------------------------------------------------------------- fast synthetic checks (no raster files / optional packages needed)
 
 def self_test() -> None:
-    """Small deterministic checks included in ``python -m src.selftest``."""
+    """Small deterministic checks included in ``python -m core.src.selftest``."""
     feb_2020 = parse_mcd64_filename("MCD64A1.A2020032.h18v05.061.2021032.hdf")
     assert feb_2020 and feb_2020["first_day"] == date(2020, 2, 1) and feb_2020["month"] == 2
     dec_2020 = parse_mcd64_filename("MCD64A1.A2020336.h18v05.061.2021032.hdf")
@@ -689,10 +691,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     events_path = Path(args.events_csv)
     if not events_path.exists():
-        parser.error(f"Events file not found: {events_path}. Run `python -m src.anomaly` first.")
+        parser.error(f"Events file not found: {events_path}. Run `python -m core.src.anomaly` first.")
     cells_path = Path(args.cells_csv)
     if not cells_path.exists():
-        parser.error(f"Cell calendar not found: {cells_path}. Run `python -m src.harmonize` first.")
+        parser.error(f"Cell calendar not found: {cells_path}. Run `python -m core.src.harmonize` first.")
     try:
         events = pd.read_csv(events_path)
         result, report = validate_events(

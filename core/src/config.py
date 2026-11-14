@@ -2,10 +2,14 @@ import os
 from pathlib import Path
 
 ROOT = Path(os.getenv("PYRO_DATA_ROOT", Path(__file__).resolve().parents[2]))
-RAW_DIR = ROOT / "data" / "raw"
+DATA_DIR = ROOT / "data"
+RAW_DIR = DATA_DIR / "raw"
+# Forecast model + forecast_by_country.csv live here (read by the Django forecast view), and the cached country borders.
+OUTPUTS_DIR = DATA_DIR / "outputs"
+CACHE_DIR = DATA_DIR / "cache"
 # Sub-folder of data/ for every output. Change it to run a sensitivity analysis next to the main run
 # (e.g. PYRO_PROCESSED_SUBDIR=processed_nonstatic) without overwriting data/processed/.
-PROCESSED_DIR = ROOT / "data" / (os.getenv("PYRO_PROCESSED_SUBDIR") or "processed")
+PROCESSED_DIR = DATA_DIR / (os.getenv("PYRO_PROCESSED_SUBDIR") or "processed")
 
 # Optional time filter (inclusive, YYYY-MM-DD). None keeps everything in the files.
 START_DATE = os.getenv("PYRO_START") or None
@@ -132,4 +136,7 @@ HOTSYNC_ANOM_MIN_POOL = int(os.getenv("PYRO_HOTSYNC_ANOM_MIN_POOL", 10))
 HOTSYNC_ANOM_MIN_ACTIVITY = float(os.getenv("PYRO_HOTSYNC_ANOM_MIN_ACTIVITY", 5))
 HOTSYNC_ANOM_MIN_OVERLAP_DAYS = int(os.getenv("PYRO_HOTSYNC_ANOM_MIN_OVERLAP_DAYS", 30))
 
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_dirs() -> None:
+    """Create the output folder. Called by the pipeline entry points (preprocess, harmonize, anomaly, ...), NOT at import
+    time: importing core from Django or a test must not create folders as a side effect."""
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)

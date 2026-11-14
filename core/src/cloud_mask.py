@@ -21,7 +21,7 @@ the file has UNKNOWN cloud cover: it is never treated as clear and never as clou
 How to produce the file from a cloud-mask product (MOD35_L2 / MYD35_L2, or a VIIRS cloud mask): clip every granule to
 the same area of interest as the fire data, take the share of area pixels that are confidently / probably clear
 (`clear_share_from_mod35` below decodes the MOD35 `Cloud_Mask` first byte), and average per UTC day. Downloading and
-clipping the granules is outside this module. `python -m src.cloud_mask file.csv` checks a file before a long run.
+clipping the granules is outside this module. `python -m core.src.cloud_mask file.csv` checks a file before a long run.
 """
 import re
 import sys
@@ -153,7 +153,7 @@ def describe(info) -> str:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        raise SystemExit("usage: python -m src.cloud_mask <cloud_file.csv>")
+        raise SystemExit("usage: python -m core.src.cloud_mask <cloud_file.csv>")
     tab = read_table(sys.argv[1])
     from core.src.config import CLOUD_MIN_CLEAR
     print(f"{len(tab):,} rows, {tab['date'].min().date()} -> {tab['date'].max().date()}, "

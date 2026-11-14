@@ -1,8 +1,8 @@
 """Train the country-by-country HotSync forecaster on real FIRMS exports.
 
 Example:
-    python train_countries.py --modis modis.csv --viirs viirs.csv
-    python train_countries.py --modis m1.csv m2.csv --viirs v1.csv --max-countries 80 --stride 2
+    python manage.py train_countries --modis modis.csv --viirs viirs.csv
+    python manage.py train_countries --modis m1.csv m2.csv --viirs v1.csv --max-countries 80 --stride 2
 """
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 
 import joblib
+
+from core.src.config import OUTPUTS_DIR
 
 from . import hotsync_country_model as cm
 from . import hotsync_model as hm
@@ -28,7 +30,7 @@ def main():
     ap.add_argument("--max-countries", type=int, default=120, help="model the N most fire-active countries")
     ap.add_argument("--min-active-days", type=int, default=60, help="skip countries with fewer fire days")
     ap.add_argument("--stride", type=int, default=3, help="use every n-th day for training (speed/memory)")
-    ap.add_argument("--out-dir", default="outputs")
+    ap.add_argument("--out-dir", default=str(OUTPUTS_DIR), help="default: <data root>/data/outputs")
     args = ap.parse_args()
 
     out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)

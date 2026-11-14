@@ -1,7 +1,7 @@
-"""python manage.py train_countries -- --modis ... --viirs ... --out-dir ...
+"""python manage.py train_countries --modis ... --viirs ... [--out-dir ...]
 
-Forwards everything after `--` to core.forecast.train_countries's own
-argparse, same pattern as ingestion's download_firms command.
+Forwards every argument after the command name to core.forecast.train_countries's
+own argparse (Django's option parser is bypassed), so no `--` separator is needed.
 """
 import sys
 
@@ -15,7 +15,8 @@ class Command(BaseCommand):
 
     def run_from_argv(self, argv):
         sys.argv = [argv[0]] + argv[2:]
-        self.execute()
+        # Django's execute() reads these options, which its own parser would normally supply.
+        self.execute(force_color=False, no_color=False, skip_checks=True)
 
     def handle(self, *args, **options):
         train_countries.main()

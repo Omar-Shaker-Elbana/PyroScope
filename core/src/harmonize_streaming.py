@@ -27,6 +27,7 @@ from core.src import cloud_mask
 from core.src import harmonize as h
 from core.src import harmonize_validation as hv
 from core.src import kmodel
+from core.src.config import ensure_dirs
 from core.src.config import (
     PROCESSED_DIR, CHUNK_ROWS, MATCH_MAX_MIN, K_FIT_MAX_DT_MIN, MIN_PAIRS_FIT,
     K_TRUST_MIN_PAIRS, K_TAU_MAX, REF_SAT, START_DATE, END_DATE, CLOUD_FILE,
@@ -50,7 +51,7 @@ SQL_COLUMNS = [
 def _stage_csv(conn: sqlite3.Connection, table: str, path: Path) -> int:
     """Import one standardized CSV in bounded chunks; store UTC timestamps as integer ns."""
     if not path.exists():
-        raise SystemExit(f"{path.name} not found. Run `python -m src.preprocess` first.")
+        raise SystemExit(f"{path.name} not found. Run `python -m core.src.preprocess` first.")
     n = 0
     usecols = lambda c: str(c).strip().lower() in set(SQL_COLUMNS)
     for chunk in pd.read_csv(path, chunksize=STREAM_CHUNK_ROWS, low_memory=False, dtype=TEXT_COLS,
@@ -481,6 +482,7 @@ def _write_calendar_cells(conn: sqlite3.Connection, path: Path, scale_basis: dic
 
 
 def run() -> None:
+    ensure_dirs()
     cloud_table = cloud_mask.read_table(CLOUD_FILE) if CLOUD_FILE is not None else None
     modis_path = PROCESSED_DIR / "modis_standardized.csv"
     viirs_path = PROCESSED_DIR / "viirs_standardized.csv"

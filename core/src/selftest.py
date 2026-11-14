@@ -1,7 +1,7 @@
 """Synthetic end-to-end check of matching, the FRP scale k, the observation-status logic, the grid diagnostics and the
 anomaly / validation code, all with a KNOWN answer. Nothing is read from or written to data/.
 
-Run:  python -m src.selftest      (must finish with SELFTEST PASSED)
+Run:  python -m core.src.selftest      (must finish with SELFTEST PASSED)
 """
 import json
 import sqlite3

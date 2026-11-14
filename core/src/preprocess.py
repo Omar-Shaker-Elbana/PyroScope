@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+from core.src.config import ensure_dirs
 from core.src.config import (
     RAW_DIR, PROCESSED_DIR, START_DATE, END_DATE, BBOX, CHUNK_ROWS, DEDUPE, AOI_FILE, EXCLUDE_STATIC
 )
@@ -260,6 +261,7 @@ def process_sensor(label, keyword, out_path):
         ["sensor_family", "source_satellite", "date"]).reset_index()]
 
 def main():
+    ensure_dirs()
     scope = "global" if BBOX is None else f"bbox {BBOX}"
     if AOI_FILE is not None:
         scope += f" masked by {AOI_FILE.name}"

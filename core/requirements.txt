@@ -2,3 +2,9 @@ pandas>=2.2
 numpy>=1.26
 matplotlib>=3.8
 scipy>=1.11
+scikit-learn>=1.4      # core.forecast: HistGradientBoostingRegressor
+joblib>=1.3            # core.forecast: trained-model files
+geopandas>=1.0         # core.forecast.legacy_hotsync_data: country borders
+# Optional, only for core.src.external_validation (MCD64A1 HDF reading):
+# rasterio
+# pyproj

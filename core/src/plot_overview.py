@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from core.src.config import ensure_dirs
 from core.src.config import PROCESSED_DIR, CHUNK_ROWS, DAY_TOL_MIN
 
 FILES = {
@@ -100,6 +101,7 @@ def plot_maps(grid):
     fig.savefig(PROCESSED_DIR / "detection_density_map.png", dpi=140)
 
 def main():
+    ensure_dirs()
     plot_counts()
     hist, grid = scan_files()
     plot_frp(hist)

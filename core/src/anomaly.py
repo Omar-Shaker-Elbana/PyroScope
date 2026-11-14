@@ -1,7 +1,7 @@
 """Phase C: anomaly detection and "critical burning windows" on the harmonized calendar.
 
 Needs MULTI-YEAR history (ideally >= 5 years; see PYRO_ANOM_MIN_YEARS). Input is
-data/processed/calendar_daily.csv from `python -m src.harmonize`.
+data/processed/calendar_daily.csv from `python -m core.src.harmonize`.
 
 What it does
  1. Builds one daily series on the VIIRS reference scale from days whose `harmonized_status` is `measured` or
@@ -26,7 +26,7 @@ What it does
       - realised, per season-year: onset (10 % of the season's FRP), peak, end (90 %), so the
         window's shift between years is visible.
 
-Run:  python -m src.anomaly
+Run:  python -m core.src.anomaly
 Outputs (data/processed): anomalies_daily.csv, anomaly_events.csv, critical_windows.csv,
 season_by_year.csv, anomaly_report.json, anomaly_overview.png and, with validation, anomaly_validation.json,
 anomaly_variants.csv, anomaly_event_variants.csv, anomaly_validation.png
@@ -36,6 +36,7 @@ import json
 import numpy as np
 import pandas as pd
 
+from core.src.config import ensure_dirs
 from core.src.config import (
     PROCESSED_DIR, ANOM_MIN_YEARS, ANOM_Z, ANOM_WINDOW_DAYS, CRIT_PCT, ANOM_VALIDATE, ANOM_INCLUDE_LOW_COVERAGE,
     ANOM_DETREND,
@@ -67,7 +68,7 @@ def md_label(doy: int) -> str:
 def load_series() -> pd.DataFrame:
     p = PROCESSED_DIR / "calendar_daily.csv"
     if not p.exists():
-        raise SystemExit("calendar_daily.csv not found. Run `python -m src.harmonize` first.")
+        raise SystemExit("calendar_daily.csv not found. Run `python -m core.src.harmonize` first.")
     cal = pd.read_csv(p, parse_dates=["date"])
     cal = cal.copy()
     if "harmonized_status" in cal.columns:
@@ -327,6 +328,7 @@ def plot(df, events, windows, sm, season_start_doy, seasons):
 
 # --------------------------------------------------------------------------- main
 def main():
+    ensure_dirs()
     cal = load_series()
     n_valid = int(cal["valid"].sum())
     n_years = n_valid / 365.25

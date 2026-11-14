@@ -13,10 +13,12 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 import os
 from pathlib import Path
 
-DATA_DIR = Path(os.getenv("PYRO_DATA_ROOT", BASE_DIR / "data"))
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Same rule as core.src.config: PYRO_DATA_ROOT is the folder that CONTAINS data/ (default: the project root),
+# so raw/, processed/, outputs/ and aoi/ resolve to the same place for the pipeline and for the views.
+DATA_DIR = Path(os.getenv("PYRO_DATA_ROOT", BASE_DIR)) / "data"
 
 
 # Quick-start development settings - unsuitable for production

@@ -1,6 +1,9 @@
+"""Print a summary of the last harmonization run. Folder = PYRO_DATA_ROOT/data/<PYRO_PROCESSED_SUBDIR or processed>.
+Run from the project root:  python -m core.check_run"""
 import json, pandas as pd, numpy as np
-d = "data/processed_24h/"
-j = json.load(open(d + "frp_mapping.json"))
+from core.src.config import PROCESSED_DIR
+d = PROCESSED_DIR
+j = json.load(open(d / "frp_mapping.json"))
 print("k per satellite:", j["k_by_modis_satellite"])
 print("scale basis:", j["scale_basis"])
 print("k window:", j["scale_policy"].get("k_window"))
@@ -8,10 +11,10 @@ for s, i in j["modis_satellites"].items():
     print(s, "| trust:", i["k_trust"], "| pairs:", i["n_pairs"], "| ci:", i.get("k_ci95"),
           "| median dt (min):", i.get("median_abs_dt_min"))
     print("   problems:", i["k_trust_problems"])
-c = pd.read_csv(d + "calendar_daily.csv")
+c = pd.read_csv(d / "calendar_daily.csv")
 print(c[["date", "viirs_detections", "viirs_frp_mw", "harmonized_status",
          "harmonized_frp_mw_viirs_equiv", "modis_frp_viirs_equiv_mw"]].to_string(index=False))
-m = pd.read_csv(d + "matched_pairs.csv")
+m = pd.read_csv(d / "matched_pairs.csv")
 print("matched MODIS pixels:", len(m), "| with a VIIRS match:", int((m.n_viirs > 0).sum()))
 print("cell_lon range:", m.cell_lon.min(), m.cell_lon.max())
 for sat in m.source_satellite.unique():

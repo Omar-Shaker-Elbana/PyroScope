@@ -219,7 +219,7 @@ COUNTRY_URL = ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
                "master/geojson/ne_50m_admin_0_countries.geojson")
 
 
-def load_countries(path: str | None = None, cache_dir: str = "cache"):
+def load_countries(path: str | None = None, cache_dir: str | None = None):
     """Natural Earth country borders (downloaded once, then cached).
 
     Pass --countries to use your own GeoJSON/Shapefile (needs NAME, ADM0_A3,
@@ -229,7 +229,9 @@ def load_countries(path: str | None = None, cache_dir: str = "cache"):
     from pathlib import Path
 
     if path is None:
-        p = Path(cache_dir) / "ne_50m_admin_0_countries.geojson"
+        from core.src.config import CACHE_DIR
+
+        p = Path(cache_dir or CACHE_DIR) / "ne_50m_admin_0_countries.geojson"
         if not p.exists():
             p.parent.mkdir(parents=True, exist_ok=True)
             print("Downloading country borders (Natural Earth, ~3 MB) ...")

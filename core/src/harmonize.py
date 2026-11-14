@@ -23,7 +23,7 @@ Steps
  5. Diagnostics (harmonize_validation.py): what k depends on, and how the 0.5 deg aggregation grid changes the
     cell-level numbers.
 
-Run:  python -m src.harmonize
+Run:  python -m core.src.harmonize
 """
 import json
 import re
@@ -38,6 +38,7 @@ from scipy.spatial import cKDTree
 from core.src import cloud_mask
 from core.src import harmonize_validation as hv
 from core.src import kmodel
+from core.src.config import ensure_dirs
 from core.src.config import (
     PROCESSED_DIR, BBOX, START_DATE, END_DATE, CELL_DEG, MATCH_MAX_MIN, DAY_TOL_MIN, MIN_PAIRS_FIT,
     K_FIT_MAX_DT_MIN, K_FIT_AUTO_WIDEN, K_FIT_WIDEN_STEPS, SINGLE_DAY_DEMO, K_TRUST_MIN_PAIRS, REF_SAT, AOI_FILE, EXCLUDE_STATIC, OUT_OF_CORE, OUT_OF_CORE_ROWS,
@@ -69,7 +70,7 @@ def load(path):
     """Load a standardized file for the legacy in-memory path (small datasets only)."""
     path = Path(path)
     if not path.exists():
-        raise SystemExit(f"{path.name} not found. Run `python -m src.preprocess` first, and check that "
+        raise SystemExit(f"{path.name} not found. Run `python -m core.src.preprocess` first, and check that "
                          "PYRO_BBOX / PYRO_START / PYRO_END leave rows for BOTH sensors.")
     df = pd.read_csv(path, usecols=lambda c: c in WANTED, parse_dates=["acq_datetime_utc"])
     df["source_satellite"] = df["source_satellite"].astype(str)
@@ -811,10 +812,11 @@ def _estimate_csv_rows(path, sample_bytes=1_048_576):
 
 
 def main():
+    ensure_dirs()
     modis_path = PROCESSED_DIR / "modis_standardized.csv"
     viirs_path = PROCESSED_DIR / "viirs_standardized.csv"
     if not modis_path.exists() or not viirs_path.exists():
-        raise SystemExit("Run `python -m src.preprocess` first; both standardized sensor files are required.")
+        raise SystemExit("Run `python -m core.src.preprocess` first; both standardized sensor files are required.")
     estimated_rows = _estimate_csv_rows(modis_path) + _estimate_csv_rows(viirs_path)
     force = OUT_OF_CORE in {"1", "true", "yes", "on"}
     disable = OUT_OF_CORE in {"0", "false", "no", "off"}

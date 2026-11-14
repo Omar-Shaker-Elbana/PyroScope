@@ -1,0 +1,31 @@
+# Project-level data folder (multi-GB satellite tiles, processed CSVs, trained models).
+# core.src.config and Django's DATA_DIR both resolve to <root>/data, or <PYRO_DATA_ROOT>/data.
+/data/*
+!/data/aoi/
+!/data/aoi/**
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Django / local config
+db.sqlite3
+.env
+.env.*
+!.env.example
+
+# Run artifacts and local backups
+*.log
+*.tmp
+*.part
+*.bak
+*_stdout.txt
+*_stderr.txt
+session
+MCD64A1_repair_backup_*/
+external_validation_backup_*/
+external_validation_retry_backup_*/

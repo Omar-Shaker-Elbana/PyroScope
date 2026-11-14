@@ -5,8 +5,8 @@ Pass it with --key or the FIRMS_MAP_KEY environment variable (it is never printe
 
 Examples (PowerShell, from the project folder):
     $env:FIRMS_MAP_KEY="your_key"
-    python -m src.download_firms --start 2018-04-01 --end 2023-12-31 --bbox 24.7,21.7,36.9,31.7
-    python -m src.download_firms --start 2019-01-01 --end 2019-12-31 --sources MODIS_SP VIIRS_SNPP_SP
+    python -m core.src.download_firms --start 2018-04-01 --end 2023-12-31 --bbox 24.7,21.7,36.9,31.7
+    python -m core.src.download_firms --start 2019-01-01 --end 2019-12-31 --sources MODIS_SP VIIRS_SNPP_SP
 
 Notes
  * Default sources: MODIS_SP (Terra+Aqua) and VIIRS_SNPP_SP (the reference VIIRS satellite).
@@ -176,7 +176,7 @@ def main():
         for s_, d_, m_ in all_skipped[:40]:
             print(f"  {s_} {d_}: {m_}")
         print("Check https://firms.modaps.eosdis.nasa.gov/api/data_availability/ or retry later; send this list if unsure.")
-    print("Done. Next: python -m src.preprocess")
+    print("Done. Next: python -m core.src.preprocess")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-"""python manage.py download_firms -- --start 2015-01-01 --end 2025-12-31 --bbox ...
+"""python manage.py download_firms --start 2015-01-01 --end 2025-12-31 [--bbox ...]
 
 core.src.download_firms.main() does its own argparse on sys.argv, so this
-command forwards whatever comes after `--` straight through. Needs
-FIRMS_MAP_KEY set in the environment.
+command forwards every argument after the command name straight through (no `--`
+separator needed). Needs FIRMS_MAP_KEY set in the environment.
 """
 import sys
 
@@ -18,7 +18,8 @@ class Command(BaseCommand):
         # Hand everything after `manage.py download_firms` to the real argparse
         # untouched, instead of Django's option parser intercepting it.
         sys.argv = [argv[0]] + argv[2:]
-        self.execute()
+        # Django's execute() reads these options, which its own parser would normally supply.
+        self.execute(force_color=False, no_color=False, skip_checks=True)
 
     def handle(self, *args, **options):
         download_firms.main()

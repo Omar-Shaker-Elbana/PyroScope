@@ -1,7 +1,7 @@
 """Pure statistical helpers for the MODIS -> VIIRS scale k (no I/O, no pipeline state).
 
 Everything here is deterministic given its inputs (random numbers come from a generator the caller passes in), so
-it can be unit-tested against a known answer in `python -m src.selftest`.
+it can be unit-tested against a known answer in `python -m core.src.selftest`.
 
 Contents
  - cell_id / cell_area_km2 / edge_split_probability : the lat/lon aggregation grid and what it costs
