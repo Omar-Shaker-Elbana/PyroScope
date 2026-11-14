@@ -65,7 +65,7 @@
       <label class="mut">Refresh <select id="ivl"><option value="0">manual</option><option value="10">10 min</option><option value="30" selected>30 min</option><option value="60">60 min</option></select></label>
       <label class="mut"><input type="checkbox" id="rem"> remember keys on this device</label>
       <button id="go">Start live</button><button id="stop" class="g">Stop</button><a class="mut" href="https://firms.modaps.eosdis.nasa.gov/api/map_key/" target="_blank" rel="noopener">Get a free key</a></div>
-      <p class="mut" id="lst">Not connected. Pulls MODIS + VIIRS near-real-time detections (last 10 days) for the selected area and keeps adding new ones.</p></details>
+      <p class="mut" id="lst">Not connected. Pulls MODIS + VIIRS near-real-time detections (last 30 days) for the selected area and keeps adding new ones.</p></details>
       <p class="mut" id="msg"></p>
     </section>
 
@@ -160,8 +160,8 @@ function csvLine(line){const out=[];let v='',q=false;for(let i=0;i<line.length;i
 function csv(t){const L=t.replace(/^\uFEFF/,'').split(/\r?\n/).filter(x=>x.trim());if(!L.length)return[];
  const H=csvLine(L[0]).map(x=>x.trim().toLowerCase());
  return L.slice(1).map(l=>{const p=csvLine(l),o={};H.forEach((h,i)=>o[h]=(p[i]||'').trim());return o})}
-function readFc(t){
- const rows=csv(t);if(!rows.length||!('country' in rows[0]))throw Error('This file has no "country" column. Run predict_countries.py and choose forecast_by_country.csv.');
+function readFcRows(rows){
+ if(!rows.length||!('country' in rows[0]))throw Error('Forecast data has no "country" column. Run predict_countries.py to create data/outputs/forecast_by_country.csv.');
  const rw=new Map(),meta=new Map();let tg='';
  for(const r of rows){const o={t:Date.parse(r.date+'T00:00:00Z'),h:num(r.horizon_days),p:num(r.predicted),lo:num(r.low_p10),hi:num(r.high_p90),typ:num(r.typical),busy:/^true$/i.test(r.busy_day||'')};
   if(!Number.isFinite(o.t)||!Number.isFinite(o.p))continue;if(!Number.isFinite(o.lo))o.lo=o.p;if(!Number.isFinite(o.hi))o.hi=o.p;
@@ -175,8 +175,10 @@ function readFc(t){
  const dd=$('#fcDay');dd.max=first.length;S.day=Math.min(S.day,first.length-1);dd.value=S.day+1;
  if(!S.sel||!rw.has(S.sel))S.sel=topCountry();
  link()}
-function readRecent(t){const m=new Map();for(const r of csv(t)){const o={t:Date.parse(r.date+'T00:00:00Z'),v:num(r.observed)};if(!Number.isFinite(o.t)||!Number.isFinite(o.v))continue;if(!m.has(r.country))m.set(r.country,[]);m.get(r.country).push(o)}
+function readFc(t){readFcRows(csv(t))}
+function readRecentRows(rows){const m=new Map();for(const r of rows){const o={t:Date.parse(r.date+'T00:00:00Z'),v:num(r.observed)};if(!Number.isFinite(o.t)||!Number.isFinite(o.v))continue;if(!m.has(r.country))m.set(r.country,[]);m.get(r.country).push(o)}
  for(const a of m.values())a.sort((x,y)=>x.t-y.t);S.recent=m}
+function readRecent(t){readRecentRows(csv(t))}
 function topCountry(){let b=null,bv=-1;for(const [c,a] of S.rows){const o=a[Math.min(S.day,a.length-1)];if(o.p>bv){bv=o.p;b=c}}return b}
 function link(){const byIso=new Map(),byName=new Map();for(const [c,m] of S.meta){if(Number.isFinite(m.iso)&&m.iso>0)byIso.set(m.iso,c);byName.set(m.name.toLowerCase(),c)}
  for(const g of S.geo)g.code=byIso.get(g.id)||byName.get((g.name||'').toLowerCase())||null}
@@ -318,24 +320,27 @@ $('#fcPlay').onclick=()=>{if(S.play){clearInterval(S.play);S.play=0;$('#fcPlay')
  $('#fcPlay').textContent='❚❚ Pause';S.play=setInterval(()=>{S.day=(S.day+1)%S.days.length;$('#fcDay').value=S.day+1;render()},700)};
 async function loadForecast() {
     try {
-        const response = await fetch('outputs/forecast_by_country.csv');
+        const response = await fetch('/api/dashboard/forecast/?limit=10000');
 
         if (!response.ok) {
-            throw new Error('Could not load forecast CSV');
+            const error = await response.json().catch(() => null);
+            throw new Error(error && error.error || 'Could not load forecast data');
         }
 
-        const text = await response.text();
-        readFc(text);
+        const payload = await response.json();
+        if (!payload.success) throw new Error(payload.error || 'Could not load forecast data');
+        readFcRows(payload.forecasts || []);
+        readRecentRows(payload.recent_observations || []);
         render();
 
-        $('#fcMsg').textContent = 'Forecast loaded successfully.';
+        $('#fcMsg').textContent = `Loaded forecasts for ${S.rows.size} countries from data/outputs/forecast_by_country.csv.`;
     } catch (error) {
         $('#fcMsg').textContent = error.message;
     }
 }
 
 loadForecast();
-$('#fcClear').onclick=()=>{clearInterval(S.play);S.play=0;$('#fcPlay').textContent='▶ Play';S.rows=new Map();S.meta=new Map();S.recent=new Map();S.met=null;S.sel=null;S.day=0;$('#fcFiles').value='';$('#fcMsg').textContent='No forecast loaded yet.';link();render()};
+$('#fcClear').onclick=()=>{clearInterval(S.play);S.play=0;$('#fcPlay').textContent='▶ Play';S.rows=new Map();S.meta=new Map();S.recent=new Map();S.met=null;S.sel=null;S.day=0;$('#fcMsg').textContent='No forecast loaded yet.';link();render()};
 let rt;addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(()=>{drawMap();drawChart()},150)});
 matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>setTimeout(()=>{legend();drawMap();drawChart()},50));
 // Optional auto-load from Django static/media URLs set on the section's data-* attributes

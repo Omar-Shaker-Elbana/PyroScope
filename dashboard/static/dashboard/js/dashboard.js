@@ -117,6 +117,19 @@ function aggregateSensor(rows,sensor){
  return cells
 }
 function median(a){if(!a.length)return NaN;const b=[...a].sort((x,y)=>x-y),m=b.length>>1;return b.length%2?b[m]:(b[m-1]+b[m])/2}
+function nearestPairedCell(cells,key,minute){
+ // MODIS and VIIRS geolocate the same fire differently. Requiring the same
+ // 0.02° cell discarded valid pairs that straddled a cell edge, so search the
+ // immediate 3×3 neighbourhood while retaining the 180-minute time limit.
+ const [latBin,lonBin,day]=key.split(':').map(Number);let best=null,bestD=Infinity;
+ for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+  const v=cells.get(`${latBin+dy}:${lonBin+dx}:${day}`);
+  if(!v||!Number.isFinite(v.frp)||v.frp<=0)continue;
+  if(Number.isFinite(minute)&&Number.isFinite(v.minute)&&Math.abs(minute-v.minute)>FRP_MATCH_MIN)continue;
+  const d=dx*dx+dy*dy;if(d<bestD){best=v;bestD=d}
+ }
+ return best
+}
 function harm(){
  // File date spans are used as nominal coverage. This assumes each uploaded archive
  // is complete for its requested date range; FIRMS detection rows alone cannot prove it.
@@ -135,8 +148,7 @@ function harm(){
  const kM=overlapM?overlapUnion/overlapM:NaN,kV=overlapV?overlapUnion/overlapV:NaN;
  // FRP scale: robust median MODIS/VIIRS ratio for spatially and temporally paired cell-days.
  const logRatios=[];let frpPairs=0;
- for(const [k,m] of C.M){const v=C.V.get(k);if(!v||!inOverlap(m.day)||!Number.isFinite(m.frp)||!Number.isFinite(v.frp)||m.frp<=0||v.frp<=0)continue;
-  if(Number.isFinite(m.minute)&&Number.isFinite(v.minute)&&Math.abs(m.minute-v.minute)>FRP_MATCH_MIN)continue;
+ for(const [k,m] of C.M){const v=nearestPairedCell(C.V,k,m.minute);if(!v||!inOverlap(m.day)||!Number.isFinite(m.frp)||m.frp<=0)continue;
   logRatios.push(Math.log(m.frp/v.frp));frpPairs++
  }
  const frpScale=logRatios.length?Math.exp(median(logRatios)):NaN;
@@ -272,15 +284,22 @@ async function liveFetch(){
  if(!LIVE||!AOI)return;const A=AOI,k=$('#key').value.trim(),cp=(v,m)=>Math.max(-m,Math.min(m,v)).toFixed(3),
   box=[cp(A.lo0,180),cp(A.la0,90),cp(A.lo1,180),cp(A.la1,90)].join(','),ds=n=>new Date(Date.now()-n*DAY).toISOString().slice(0,10),st=$('#lst');
  st.textContent='Fetching latest detections…';
- try{let add=0;
-  for(const[src,s]of[['MODIS_NRT','M'],['VIIRS_SNPP_NRT','V']])for(const n of[9,4]){
+ // Stage a complete two-sensor update before changing the map. Previously a
+ // failed VIIRS request left already-added MODIS rows on screen, which looked
+ // like a successful MODIS-only refresh.
+ try{let add=0;const staged=[],stagedSeen=new Set(),fetched={M:0,V:0},added={M:0,V:0};
+  // FIRMS retired the Suomi-NPP feed in November 2026. NOAA-20 is its
+  // supported 375 m VIIRS successor; keep it as one VIIRS series rather than
+  // combining multiple platforms and double-counting the same fires.
+  for(const[src,s]of[['MODIS_NRT','M'],['VIIRS_NOAA20_NRT','V']])for(const n of[29,24,19,14,9,4]){
    const r=await fetch(`https://firms.modaps.eosdis.nasa.gov/api/area/csv/${encodeURIComponent(k)}/${src}/${box}/5/${ds(n)}`),tx=await r.text();
    if(A!==AOI||!LIVE)return;
-   if(!r.ok||!/latitude/i.test(tx.split('\n')[0]))throw Error(tx.trim().slice(0,140)||'HTTP '+r.status);
-   if(tx.trim().split('\n').length>1)for(const o of parse(tx,s)){const q=s+o.lat+o.lon+o.day+o.minute;if(!LSEEN.has(q)){LSEEN.add(q);ROWS.push(o);add++}}}
+   if(!r.ok||!/latitude/i.test(tx.split('\n')[0]))throw Error(`${src}: ${tx.trim().slice(0,140)||'HTTP '+r.status}`);
+   if(tx.trim().split('\n').length>1)for(const o of parse(tx,s)){fetched[s]++;const q=s+o.lat+o.lon+o.day+o.minute;if(!LSEEN.has(q)&&!stagedSeen.has(q)){stagedSeen.add(q);staged.push([q,o]);added[s]++;add++}}}
+  for(const[q,o]of staged){LSEEN.add(q);ROWS.push(o)}
   REAL=true;YS=[...new Set(ROWS.map(o=>o.y))].sort((a,b)=>a-b);if(!YS.length)YS=[new Date().getUTCFullYear()];heat();analyze();
-  st.textContent=`Live · ${ROWS.length.toLocaleString()} detections in this area (${add} new) · updated ${new Date().toLocaleTimeString()}`
- }catch(e){st.textContent=e instanceof TypeError?'Could not reach NASA FIRMS (offline, or the browser blocked the request).':'FIRMS error: '+e.message}}
+  st.textContent=`Live · ${ROWS.length.toLocaleString()} detections in this area (${add} new: MODIS ${added.M}, VIIRS ${added.V}; fetched MODIS ${fetched.M}, VIIRS ${fetched.V}) · updated ${new Date().toLocaleTimeString()}`
+ }catch(e){st.textContent=e instanceof TypeError?'Could not reach NASA FIRMS (offline, or the browser blocked the request).':'FIRMS update was not applied: '+e.message}}
 function armLive(){clearInterval(LT);const m=+$('#ivl').value;LT=m?setInterval(liveFetch,m*6e4):0}
 $('#go').onclick=()=>{if(!$('#key').value.trim()){$('#lst').textContent='Paste your FIRMS MAP_KEY first (free, takes a minute).';return}
  store(KEYK,$('#key').value.trim());LIVE=true;REAL=true;ROWS=[];LSEEN.clear();YS=[new Date().getUTCFullYear()];armLive();
