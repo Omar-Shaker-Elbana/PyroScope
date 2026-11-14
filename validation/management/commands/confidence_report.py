@@ -32,10 +32,13 @@ class Command(BaseCommand):
 
         scored = report["in_band"].notna()
         flagged = report["confidence_flag"].isin(["CAUTION", "LOW_TRUST", "UNKNOWN"])
+        overall = confidence.backtest_metrics(report).iloc[0]
         self.stdout.write(
             f"{report['country'].nunique()} countries, {len(report)} rows, "
             f"{int(scored.sum())} scored against observed activity so far "
             f"({int((report.loc[scored, 'in_band']).sum())} inside the 10-90% band), "
             f"{int(flagged.sum())} rows flagged for weak harmonization trust.\n"
+            f"MAE={overall['mae']:.3g}  RMSE={overall['rmse']:.3g}  "
+            f"coverage={overall['coverage']:.1%}  (n={int(overall['n_scored'])})\n"
             f"Saved {out}"
         )

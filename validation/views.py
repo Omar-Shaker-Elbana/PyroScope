@@ -23,11 +23,16 @@ def report(request):
         return HttpResponse(str(exc), status=501)
 
     rows = data.to_dict("records")
+    overall = confidence.backtest_metrics(data).iloc[0]
     summary = {
         "countries": data["country"].nunique(),
         "rows": len(data),
         "scored": int(data["in_band"].notna().sum()),
         "in_band": int(data["in_band"].fillna(False).sum()),
         "flagged": int(data["confidence_flag"].isin(["CAUTION", "LOW_TRUST", "UNKNOWN"]).sum()),
+        "mae": overall["mae"],
+        "rmse": overall["rmse"],
+        "coverage": overall["coverage"],
     }
-    return render(request, "validation/report.html", {"rows": rows, "summary": summary})
+    by_country = confidence.backtest_metrics(data, by_country=True).to_dict("records")
+    return render(request, "validation/report.html", {"rows": rows, "summary": summary, "by_country": by_country})

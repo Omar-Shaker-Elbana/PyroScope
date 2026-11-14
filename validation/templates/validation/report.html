@@ -5,6 +5,22 @@
     observed activity so far ({{ summary.in_band }} inside the 10-90% band),
     {{ summary.flagged }} flagged for weak harmonization trust.
   </p>
+  <p>
+    Overall: MAE={{ summary.mae|floatformat:3 }}  RMSE={{ summary.rmse|floatformat:3 }}
+    coverage={{ summary.coverage|floatformat:1 }}
+  </p>
+  {% if by_country %}
+  <table>
+    <tr><th>Country</th><th>Scored</th><th>MAE</th><th>RMSE</th><th>Coverage</th></tr>
+    {% for c in by_country %}
+      <tr>
+        <td>{{ c.country }}</td><td>{{ c.n_scored }}</td>
+        <td>{{ c.mae|floatformat:3 }}</td><td>{{ c.rmse|floatformat:3 }}</td>
+        <td>{{ c.coverage|floatformat:1 }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
   <table>
     <tr>
       <th>Country</th><th>Date</th><th>Horizon</th><th>Predicted</th><th>p10-p90</th><th>Observed</th>

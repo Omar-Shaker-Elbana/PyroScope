@@ -272,6 +272,42 @@ def confidence_report(backtest: pd.DataFrame, confidence: pd.DataFrame) -> pd.Da
     return report[cols].sort_values(["country", "date", "horizon_days"]).reset_index(drop=True)
 
 
+def backtest_metrics(report: pd.DataFrame, by_country: bool = False) -> pd.DataFrame:
+    """MAE / RMSE / coverage over `report` (backtest_forecast()'s or confidence_report()'s
+    output) -- the plan's step 4: "recompute MAE/RMSE/coverage" against live data, the same
+    three numbers outputs/metrics.json held for the historical holdout.
+
+    Only rows with an actual observed value are scored (`error`/`abs_error` notna); a row still
+    pending (forecast date in the future, or that day not yet harmonized) is excluded from every
+    metric here rather than silently treated as a zero-error match.
+
+    With `by_country=False` (default), returns a single-row DataFrame (overall MAE/RMSE/coverage
+    plus `n_scored`). With `by_country=True`, one row per country, so a country with a much worse
+    MAE than the rest -- which the per-row `confidence_flag` and `harmonization_explains_miss`
+    columns can then help explain -- doesn't get averaged away into the overall number.
+    """
+    scored = report[report["abs_error"].notna()]
+
+    def _agg(g: pd.DataFrame) -> pd.Series:
+        n = len(g)
+        in_band = g["in_band"].dropna()
+        return pd.Series({
+            "n_scored": n,
+            "mae": g["abs_error"].mean() if n else float("nan"),
+            "rmse": float(np.sqrt((g["error"] ** 2).mean())) if n else float("nan"),
+            "coverage": in_band.mean() if len(in_band) else float("nan"),
+        })
+
+    if not by_country:
+        return _agg(scored).to_frame().T
+
+    return (
+        scored.groupby("country", as_index=False)
+        .apply(_agg, include_groups=False)
+        .reset_index(drop=True)
+    )
+
+
 def build_report(countries: list[str] | None = None, forecast_csv: str | Path | None = None) -> pd.DataFrame:
     """End-to-end entry point: wires load_observed_activity + backtest_forecast +
     harmonization_confidence + confidence_report together from whatever is already on disk.
