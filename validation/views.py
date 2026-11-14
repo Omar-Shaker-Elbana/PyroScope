@@ -7,16 +7,27 @@ from core.validation import confidence
 def report(request):
     """The confidence report from the original plan's steps 4-6: forecast
     error against real data, alongside whether weak harmonization trust
-    explains it. core.validation.confidence isn't implemented yet (every
-    function there raises NotImplementedError) — this view exists so the
-    URL/template wiring is in place once it is.
+    explains it. core.validation.confidence.build_report() reads whatever
+    `predict_countries` / `harmonize` last wrote to disk -- it runs neither
+    pipeline step itself.
+
+    ?countries=EGY,SDN restricts the report to those country codes; left out,
+    every country in the current forecast_by_country.csv is reported.
     """
+    countries = request.GET.get("countries")
+    countries = [c.strip() for c in countries.split(",") if c.strip()] if countries else None
+
     try:
-        data = confidence.confidence_report(backtest=None, confidence=None)  # TODO: real inputs
-    except NotImplementedError:
-        return HttpResponse(
-            "Validation logic not implemented yet — see core/validation/confidence.py "
-            "(plan steps 4-6).",
-            status=501,
-        )
-    return render(request, "validation/report.html", {"data": data})
+        data = confidence.build_report(countries=countries)
+    except FileNotFoundError as exc:
+        return HttpResponse(str(exc), status=501)
+
+    rows = data.to_dict("records")
+    summary = {
+        "countries": data["country"].nunique(),
+        "rows": len(data),
+        "scored": int(data["in_band"].notna().sum()),
+        "in_band": int(data["in_band"].fillna(False).sum()),
+        "flagged": int(data["confidence_flag"].isin(["CAUTION", "LOW_TRUST", "UNKNOWN"]).sum()),
+    }
+    return render(request, "validation/report.html", {"rows": rows, "summary": summary})

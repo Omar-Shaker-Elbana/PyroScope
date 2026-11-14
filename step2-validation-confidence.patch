@@ -1,0 +1,482 @@
+diff --git a/core/validation/__init__.py b/core/validation/__init__.py
+index 14aca82..5c9a877 100644
+--- a/core/validation/__init__.py
++++ b/core/validation/__init__.py
+@@ -1,14 +1,25 @@
+ """core.validation: forecast-vs-real-data confidence scoring (plan steps 4-6).
+ 
+-Not implemented yet — this is the scaffold the `validation` Django app
+-imports from. See confidence.py for the function signatures to fill in:
++Step 2 of the plan is implemented in confidence.py:
+ 
+-  1. harmonize real-time FIRMS data through core.src.harmonize for the same
+-     region/countries as core.forecast's model, instead of legacy_hotsync_data.
+-  2. join forecast_by_country.csv against that observed activity by
+-     (country, date) and compute error metrics (extends outputs/metrics.json's
+-     historical backtest into live data).
+-  3. attach a harmonization-confidence flag per (country, date) from
+-     core.src.harmonize's k_trust / bootstrap CI / anomaly-validation output,
+-     separate from the forecast model's own p10/p90 uncertainty.
++  1. load_observed_activity(): per-country harmonized activity, read from
++     whatever `python manage.py harmonize` last wrote to
++     core.src.config.PROCESSED_DIR (calendar_cells.csv / calendar_daily.csv) --
++     core.src.harmonize's per-satellite k, bootstrap CIs and trust grades,
++     not legacy_hotsync_data's single global kM/kV.
++  2. backtest_forecast(): joins core.forecast's forecast_by_country.csv
++     against that observed activity by (country, date) -- the same predicted
++     vs. observed comparison worldmap_forcase/jspyro drew as a chart
++     (HotSync_harmonized_Final.html's forecast-section: orange predicted band
++     vs. teal observed), but scored as a real backtest against PyroScope's
++     more accurate harmonization instead of eyeballed on a plot.
++  3. harmonization_confidence(): attaches a confidence flag per country from
++     core.src.harmonize's k_trust / bootstrap CI-width / k-window-widened
++     output (frp_mapping.json), independent of the forecast model's own
++     p10/p90 band.
++  4. confidence_report(): merges 2 + 3 into the table the `validation` app's
++     view renders.
++
++build_report() in confidence.py wires all four together and is what the
++Django view/management command call.
+ """
+diff --git a/core/validation/confidence.py b/core/validation/confidence.py
+index 2188ed7..238c42d 100644
+--- a/core/validation/confidence.py
++++ b/core/validation/confidence.py
+@@ -1,11 +1,90 @@
+-"""Skeleton for plan steps 4-6. Every function below is a TODO stub —
+-signatures and docstrings only, so the `validation` app has something real
+-to import while the logic gets filled in next.
++"""Plan steps 4-6: forecast-vs-real-data confidence report.
++
++Ports worldmap_forcase/jspyro's forecast-vs-observed comparison (the
++forecast-section chart in HotSync_harmonized_Final.html: an orange
++predicted band from forecast_by_country.csv overlaid with teal observed
++activity from recent_by_country.csv, scored against a same-season baseline
++in metrics.json) into core -- same idea, but computed as a real statistical
++backtest here instead of eyeballed on a chart, and against
++core.src.harmonize's per-satellite, trust-graded activity instead of
++worldmap_forcase's single global kM/kV scale (see
++core/forecast/legacy_hotsync_data.py's module docstring).
++
++Everything here is read-only against whatever the management commands /
++cron already wrote to disk (the plan's "pipelines run async, the web layer
++just reads whatever they last wrote"):
++
++  core.src.config.PROCESSED_DIR/calendar_cells.csv   per-cell-day harmonized FRP   (`manage.py harmonize`)
++  core.src.config.PROCESSED_DIR/calendar_daily.csv   day-level harmonized_status   (`manage.py harmonize`)
++  core.src.config.PROCESSED_DIR/frp_mapping.json     k_trust grades for that run  (`manage.py harmonize`)
++  core.src.config.OUTPUTS_DIR/forecast_by_country.csv the model's 14-day forecast  (`manage.py predict_countries`)
++
++Nothing here re-runs preprocess/harmonize/predict_countries itself.
+ """
+ from __future__ import annotations
+ 
++import json
++from pathlib import Path
++
++import numpy as np
+ import pandas as pd
+ 
++from core.src.config import OUTPUTS_DIR, PROCESSED_DIR
++
++# cell_id (core.src.harmonize's CELL_DEG grid) -> Natural Earth country code ("ADM0_A3"),
++# filled in lazily by _cell_country_map and cached for the life of the process. core.src.harmonize's
++# default 0.5 deg grid is coarser than legacy_hotsync_data's 0.02 deg one, so this is its own
++# cell->country join, not a reuse of build_cell_country_map's cell keys.
++_CELL_COUNTRY: dict[int, str] = {}
++_BORDERS = None
++
++
++def _country_borders():
++    """Natural Earth admin-0 borders (country, name, iso_n3, geometry), cached.
++    Reuses core.forecast.legacy_hotsync_data.load_countries so both layers agree on which
++    polygon owns which coastline and on the on-disk cache under core.src.config.CACHE_DIR."""
++    global _BORDERS
++    if _BORDERS is None:
++        from core.forecast.legacy_hotsync_data import load_countries
++
++        _BORDERS = load_countries()
++    return _BORDERS
++
++
++def _cell_country_map(cells: pd.DataFrame) -> pd.Series:
++    """cell_id -> country code for every cell_id in `cells`, filling `_CELL_COUNTRY` for any
++    cell seen for the first time. Done on unique cells, not rows, so repeated calls over a growing
++    calendar stay cheap. Cells just offshore are snapped to the nearest coast (<= 0.3 deg)."""
++    unseen = cells.loc[~cells["cell_id"].isin(_CELL_COUNTRY), ["cell_id", "cell_lat", "cell_lon"]]
++    unseen = unseen.drop_duplicates("cell_id")
++    if len(unseen):
++        import warnings
++
++        import geopandas as gpd
++
++        pts = gpd.GeoDataFrame(
++            {"cell_id": unseen["cell_id"].to_numpy()},
++            geometry=gpd.points_from_xy(unseen["cell_lon"], unseen["cell_lat"]),
++            crs="EPSG:4326",
++        )
++        ref = _country_borders()[["country", "geometry"]]
++        j = gpd.sjoin(pts, ref, how="left", predicate="within").drop_duplicates("cell_id")
++        miss = j["country"].isna()
++        if miss.any():
++            with warnings.catch_warnings():
++                warnings.simplefilter("ignore")
++                near = gpd.sjoin_nearest(
++                    pts[pts["cell_id"].isin(j.loc[miss, "cell_id"])], ref, how="left", max_distance=0.3
++                ).drop_duplicates("cell_id")
++            j = j.set_index("cell_id")
++            j.loc[near["cell_id"].to_numpy(), "country"] = near["country"].to_numpy()
++            j = j.reset_index()
++        for cid, country in zip(j["cell_id"], j["country"]):
++            if pd.notna(country):
++                _CELL_COUNTRY[int(cid)] = country
++
++    return cells["cell_id"].map(_CELL_COUNTRY)
++
+ 
+ def load_observed_activity(countries: list[str], start: str, end: str) -> pd.DataFrame:
+     """Real-time FIRMS -> core.src.harmonize -> per-country wide activity table,
+@@ -14,8 +93,66 @@ def load_observed_activity(countries: list[str], start: str, end: str) -> pd.Dat
+     Returns a DataFrame shaped like core.forecast.legacy_hotsync_data's
+     `wide` (date index, one column per country code), but produced by
+     core.src.harmonize's per-satellite k instead of the legacy global kM/kV.
++
++    Reads calendar_cells.csv / calendar_daily.csv from PROCESSED_DIR as the
++    harmonize management command last wrote them; it does not fetch FIRMS or
++    run the pipeline itself. A date outside [start, end] or a day
++    harmonize's calendar marked not `harmonized_is_measured` (cloud, sensor
++    outage, partial window, ...) is NaN, never 0: a day without data is not
++    a day without fire.
+     """
+-    raise NotImplementedError
++    cells_path = PROCESSED_DIR / "calendar_cells.csv"
++    cal_path = PROCESSED_DIR / "calendar_daily.csv"
++    if not cells_path.exists() or not cal_path.exists():
++        raise FileNotFoundError(
++            f"{cells_path.name} / {cal_path.name} not found in {PROCESSED_DIR}. Run "
++            "`python manage.py preprocess` then `python manage.py harmonize` first."
++        )
++
++    t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
++    days = pd.date_range(t0, t1, freq="D")
++
++    cal = pd.read_csv(cal_path, parse_dates=["date"], usecols=["date", "harmonized_is_measured"])
++    cal = cal[cal["date"].between(t0, t1)]
++    measured_days = set(cal.loc[cal["harmonized_is_measured"].astype(bool), "date"])
++
++    cells = pd.read_csv(
++        cells_path,
++        parse_dates=["date"],
++        usecols=["sensor_family", "date", "cell_id", "cell_lat", "cell_lon", "frp_mw", "frp_viirs_equiv_mw"],
++    )
++    cells = cells[cells["date"].between(t0, t1)]
++
++    wide = pd.DataFrame(index=days, columns=list(countries) if countries else [])
++    wide.index.name = "date"
++    if cells.empty:
++        return wide
++
++    cells["country"] = _cell_country_map(cells)
++    cells = cells.dropna(subset=["country"])
++    if countries:
++        cells = cells[cells["country"].isin(countries)]
++    if cells.empty:
++        return wide
++
++    # VIIRS cells are already on the reference scale; MODIS cells contribute only the
++    # VIIRS-equivalent FRP core.src.harmonize fitted for their own satellite (NaN -- dropped by the
++    # sum below, not treated as 0 -- when that satellite has no validated k; see frp_mapping.json).
++    cells["harmonized_frp"] = np.where(
++        cells["sensor_family"] == "VIIRS", cells["frp_mw"], cells["frp_viirs_equiv_mw"]
++    )
++    cells = cells.dropna(subset=["harmonized_frp"])
++
++    by_day = cells.groupby(["date", "country"])["harmonized_frp"].sum(min_count=1).unstack("country")
++    by_day = by_day.reindex(index=days)
++    if countries:
++        by_day = by_day.reindex(columns=countries)
++    by_day.index.name = "date"
++
++    # A day the calendar did not score as measured is unknown for every country, not a measured zero.
++    unmeasured = [d for d in days if d not in measured_days]
++    by_day.loc[by_day.index.isin(unmeasured)] = np.nan
++    return by_day
+ 
+ 
+ def backtest_forecast(forecast_csv: str, observed: pd.DataFrame) -> pd.DataFrame:
+@@ -25,18 +162,96 @@ def backtest_forecast(forecast_csv: str, observed: pd.DataFrame) -> pd.DataFrame
+     low_p10, high_p90, observed, error, abs_error, and whether observed
+     fell inside [low_p10, high_p90]. This is outputs/metrics.json's
+     backtest, but against live data instead of a historical holdout.
++
++    `in_band` is NaN (not True/False) for a (country, date) that has no
++    observed value yet -- either the forecast date is still in the future,
++    or `load_observed_activity` marked it unmeasured.
+     """
+-    raise NotImplementedError
++    path = Path(forecast_csv)
++    if not path.exists():
++        raise FileNotFoundError(f"{path} not found. Run `python manage.py predict_countries` first.")
++    fc = pd.read_csv(path, parse_dates=["date"])
++    needed = {"country", "date", "horizon_days", "predicted", "low_p10", "high_p90"}
++    missing = needed - set(fc.columns)
++    if missing:
++        raise ValueError(f"{path} is missing column(s): {sorted(missing)}")
++
++    # melt, not stack: keeps NaN rows (a country/date with no observed value yet) regardless of
++    # pandas version, instead of relying on stack()'s dropna behaviour (removed in pandas >= 3).
++    obs = observed.reset_index().melt(id_vars="date", var_name="country", value_name="observed")
++
++    out = fc.merge(obs, on=["date", "country"], how="left")
++    out["error"] = out["observed"] - out["predicted"]
++    out["abs_error"] = out["error"].abs()
++    # nullable "boolean" dtype: True/False where observed, <NA> (not NaN-in-a-bool-column, which
++    # pandas refuses) where there is nothing to score yet.
++    out["in_band"] = out["observed"].between(out["low_p10"], out["high_p90"]).astype("boolean")
++    out.loc[out["observed"].isna(), "in_band"] = pd.NA
++
++    cols = ["country", "date", "horizon_days", "predicted", "low_p10", "high_p90",
++            "observed", "error", "abs_error", "in_band"]
++    return out[cols].sort_values(["country", "date", "horizon_days"]).reset_index(drop=True)
++
++
++# k_trust grades in increasing order of trust, for picking the worst satellite in a run.
++_K_TRUST_ORDER = {"NOT_VALIDATED": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
+ 
+ 
+ def harmonization_confidence(frp_mapping: dict, countries: list[str]) -> pd.DataFrame:
+     """Per-country harmonization-confidence flag, from core.src.harmonize's
+     frp_mapping.json: k_trust grade, bootstrap CI width, and whether the
+     window had to be widened. This is independent of the forecast model's
+-    own p10/p90 band — a country can have a tight forecast interval built
+-    on untrustworthy harmonization, and this is what should catch that.
++    own p10/p90 band built on it -- a country can have a tight forecast
++    interval built on untrustworthy harmonization, and this is what should
++    catch that.
++
++    One frp_mapping.json covers one harmonize run over a region, not one
++    run per country, so every country in that run's coverage gets the SAME
++    k_trust / CI-width / window columns here: the grade describes the
++    harmonization the forecast's observed activity was built from, not a
++    per-country sample size.
+     """
+-    raise NotImplementedError
++    frp_mapping = frp_mapping or {}
++    satellites = frp_mapping.get("modis_satellites") or {}
++    window = (frp_mapping.get("scale_policy") or {}).get("k_window") or {}
++    widened = bool(window.get("widened"))
++
++    grades = {s: (info or {}).get("k_trust", "NOT_VALIDATED") for s, info in satellites.items()}
++    worst_sat = min(grades, key=lambda s: _K_TRUST_ORDER.get(grades[s], 0)) if grades else None
++    worst_grade = grades.get(worst_sat, "NOT_VALIDATED")
++
++    def _ci_width_pct(info):
++        ci, k = (info or {}).get("k_ci95"), (info or {}).get("k")
++        if not ci or not k:
++            return np.nan
++        return float((ci[1] - ci[0]) / k) * 100.0
++
++    ci_widths = [w for w in (_ci_width_pct(info) for info in satellites.values()) if np.isfinite(w)]
++    worst_ci_pct = max(ci_widths) if ci_widths else np.nan
++
++    problems = sorted({p for info in satellites.values() for p in (info or {}).get("k_trust_problems", [])})
++    if widened:
++        problems.append(f"k time-gap window widened to {window.get('used_min')} min "
++                         f"(from {window.get('strict_min')} min)")
++
++    if not satellites:
++        flag = "UNKNOWN"
++    elif worst_grade == "HIGH" and not widened:
++        flag = "OK"
++    elif worst_grade in ("HIGH", "MEDIUM"):
++        flag = "CAUTION"
++    else:
++        flag = "LOW_TRUST"
++
++    row = {
++        "k_trust": worst_grade,
++        "k_trust_satellite": worst_sat,
++        "k_ci95_width_pct": worst_ci_pct,
++        "k_window_widened": widened,
++        "confidence_flag": flag,
++        "harmonization_problems": "; ".join(problems),
++    }
++    return pd.DataFrame([{**{"country": c}, **row} for c in countries])
+ 
+ 
+ def confidence_report(backtest: pd.DataFrame, confidence: pd.DataFrame) -> pd.DataFrame:
+@@ -44,4 +259,43 @@ def confidence_report(backtest: pd.DataFrame, confidence: pd.DataFrame) -> pd.Da
+     per-country/date table the `validation` app's view renders: forecast
+     error AND whether that error is explained by weak harmonization trust.
+     """
+-    raise NotImplementedError
++    report = backtest.merge(confidence, on="country", how="left")
++    # in_band is nullable ("boolean" dtype): <NA> means "not scored yet", not a miss, so a pending
++    # row is never flagged as a harmonization-explained miss even though it isn't in_band either.
++    missed = report["in_band"].notna() & ~report["in_band"]
++    report["harmonization_explains_miss"] = missed & report["confidence_flag"].isin(
++        ["CAUTION", "LOW_TRUST", "UNKNOWN"]
++    )
++    cols = ["country", "date", "horizon_days", "predicted", "low_p10", "high_p90", "observed",
++            "error", "abs_error", "in_band", "k_trust", "k_trust_satellite", "k_ci95_width_pct",
++            "k_window_widened", "confidence_flag", "harmonization_problems", "harmonization_explains_miss"]
++    return report[cols].sort_values(["country", "date", "horizon_days"]).reset_index(drop=True)
++
++
++def build_report(countries: list[str] | None = None, forecast_csv: str | Path | None = None) -> pd.DataFrame:
++    """End-to-end entry point: wires load_observed_activity + backtest_forecast +
++    harmonization_confidence + confidence_report together from whatever is already on disk.
++    This is what the `validation` app's view and management command call.
++
++    `countries` defaults to every country forecast_by_country.csv covers. The observed window is
++    the forecast's own date range, so a date still in the future simply comes back with `observed`
++    / `in_band` as NaN until a later harmonize run has data for it -- the same thing jspyro's chart
++    did by only drawing teal "observed" points up to the last day recent_by_country.csv had.
++    """
++    forecast_csv = Path(forecast_csv) if forecast_csv else OUTPUTS_DIR / "forecast_by_country.csv"
++    if not forecast_csv.exists():
++        raise FileNotFoundError(f"{forecast_csv} not found. Run `python manage.py predict_countries` first.")
++
++    fc_head = pd.read_csv(forecast_csv, usecols=["country", "date"], parse_dates=["date"])
++    if not countries:
++        countries = sorted(fc_head["country"].unique())
++    start, end = fc_head["date"].min(), fc_head["date"].max()
++
++    observed = load_observed_activity(countries, str(start.date()), str(end.date()))
++    backtest = backtest_forecast(str(forecast_csv), observed)
++
++    mapping_path = PROCESSED_DIR / "frp_mapping.json"
++    frp_mapping = json.loads(mapping_path.read_text()) if mapping_path.exists() else {}
++    confidence = harmonization_confidence(frp_mapping, countries)
++
++    return confidence_report(backtest, confidence)
+diff --git a/validation/management/__init__.py b/validation/management/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/validation/management/commands/__init__.py b/validation/management/commands/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/validation/management/commands/confidence_report.py b/validation/management/commands/confidence_report.py
+new file mode 100644
+index 0000000..6c24f85
+--- /dev/null
++++ b/validation/management/commands/confidence_report.py
+@@ -0,0 +1,41 @@
++"""python manage.py confidence_report [--countries EGY,SDN] [--forecast-csv PATH] [--out PATH]
++
++Runs core.validation.confidence.build_report() and writes confidence_report.csv into
++core.src.config.OUTPUTS_DIR (next to forecast_by_country.csv), the way predict_countries writes
++forecast_by_country.csv and harmonize writes frp_mapping.json: a plain file the `validation` app's
++view then just reads/recomputes on request, and that a cron job can run on a schedule.
++"""
++from django.core.management.base import BaseCommand, CommandError
++
++from core.src.config import OUTPUTS_DIR
++from core.validation import confidence
++
++
++class Command(BaseCommand):
++    help = "Backtest the forecast against harmonized real-world activity (core.validation.confidence)."
++
++    def add_arguments(self, parser):
++        parser.add_argument("--countries", help="Comma-separated country codes; default: every country "
++                                                  "in forecast_by_country.csv")
++        parser.add_argument("--forecast-csv", default=None, help="default: OUTPUTS_DIR/forecast_by_country.csv")
++        parser.add_argument("--out", default=None, help="default: OUTPUTS_DIR/confidence_report.csv")
++
++    def handle(self, *args, **options):
++        countries = [c.strip() for c in options["countries"].split(",") if c.strip()] if options["countries"] else None
++        try:
++            report = confidence.build_report(countries=countries, forecast_csv=options["forecast_csv"])
++        except (FileNotFoundError, ValueError) as exc:
++            raise CommandError(str(exc))
++
++        out = options["out"] or (OUTPUTS_DIR / "confidence_report.csv")
++        report.to_csv(out, index=False)
++
++        scored = report["in_band"].notna()
++        flagged = report["confidence_flag"].isin(["CAUTION", "LOW_TRUST", "UNKNOWN"])
++        self.stdout.write(
++            f"{report['country'].nunique()} countries, {len(report)} rows, "
++            f"{int(scored.sum())} scored against observed activity so far "
++            f"({int((report.loc[scored, 'in_band']).sum())} inside the 10-90% band), "
++            f"{int(flagged.sum())} rows flagged for weak harmonization trust.\n"
++            f"Saved {out}"
++        )
+diff --git a/validation/templates/validation/report.html b/validation/templates/validation/report.html
+new file mode 100644
+index 0000000..d76e8a7
+--- /dev/null
++++ b/validation/templates/validation/report.html
+@@ -0,0 +1,28 @@
++<h1>Forecast confidence report</h1>
++{% if rows %}
++  <p>
++    {{ summary.countries }} countries, {{ summary.rows }} forecast rows, {{ summary.scored }} scored against
++    observed activity so far ({{ summary.in_band }} inside the 10-90% band),
++    {{ summary.flagged }} flagged for weak harmonization trust.
++  </p>
++  <table>
++    <tr>
++      <th>Country</th><th>Date</th><th>Horizon</th><th>Predicted</th><th>p10-p90</th><th>Observed</th>
++      <th>In band?</th><th>k_trust</th><th>Confidence</th><th>Harmonization explains miss?</th>
++    </tr>
++    {% for r in rows %}
++      <tr>
++        <td>{{ r.country }}</td><td>{{ r.date }}</td><td>{{ r.horizon_days }}</td>
++        <td>{{ r.predicted }}</td><td>{{ r.low_p10 }}-{{ r.high_p90 }}</td>
++        <td>{% if r.observed is not None %}{{ r.observed }}{% else %}pending{% endif %}</td>
++        <td>{{ r.in_band }}</td><td>{{ r.k_trust }}</td><td>{{ r.confidence_flag }}</td>
++        <td>{{ r.harmonization_explains_miss }}</td>
++      </tr>
++    {% endfor %}
++  </table>
++  <p>(Placeholder table -- swap for the real Leaflet/scripts.js-style map once ported, the way
++  forecast/map.html and ingestion/status.html are placeholders too.)</p>
++{% else %}
++  <p>No confidence report yet. Run: python manage.py harmonize &amp;&amp; python manage.py predict_countries
++  -- ... &amp;&amp; python manage.py confidence_report</p>
++{% endif %}
+diff --git a/validation/views.py b/validation/views.py
+index 6b78f98..f2b53d5 100644
+--- a/validation/views.py
++++ b/validation/views.py
+@@ -7,16 +7,27 @@ from core.validation import confidence
+ def report(request):
+     """The confidence report from the original plan's steps 4-6: forecast
+     error against real data, alongside whether weak harmonization trust
+-    explains it. core.validation.confidence isn't implemented yet (every
+-    function there raises NotImplementedError) — this view exists so the
+-    URL/template wiring is in place once it is.
++    explains it. core.validation.confidence.build_report() reads whatever
++    `predict_countries` / `harmonize` last wrote to disk -- it runs neither
++    pipeline step itself.
++
++    ?countries=EGY,SDN restricts the report to those country codes; left out,
++    every country in the current forecast_by_country.csv is reported.
+     """
++    countries = request.GET.get("countries")
++    countries = [c.strip() for c in countries.split(",") if c.strip()] if countries else None
++
+     try:
+-        data = confidence.confidence_report(backtest=None, confidence=None)  # TODO: real inputs
+-    except NotImplementedError:
+-        return HttpResponse(
+-            "Validation logic not implemented yet — see core/validation/confidence.py "
+-            "(plan steps 4-6).",
+-            status=501,
+-        )
+-    return render(request, "validation/report.html", {"data": data})
++        data = confidence.build_report(countries=countries)
++    except FileNotFoundError as exc:
++        return HttpResponse(str(exc), status=501)
++
++    rows = data.to_dict("records")
++    summary = {
++        "countries": data["country"].nunique(),
++        "rows": len(data),
++        "scored": int(data["in_band"].notna().sum()),
++        "in_band": int(data["in_band"].fillna(False).sum()),
++        "flagged": int(data["confidence_flag"].isin(["CAUTION", "LOW_TRUST", "UNKNOWN"]).sum()),
++    }
++    return render(request, "validation/report.html", {"rows": rows, "summary": summary})
